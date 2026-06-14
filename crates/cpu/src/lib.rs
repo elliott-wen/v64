@@ -5,7 +5,9 @@
 //! currently execute.
 
 mod flags;
+pub mod regs;
 mod state;
 
 pub use flags::Flags;
+pub use regs::GuestRegs;
 pub use state::{CpuState, SP_OR_ZR};
