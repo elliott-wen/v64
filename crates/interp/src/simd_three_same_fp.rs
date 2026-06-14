@@ -190,9 +190,17 @@ fn rsqrts_s(a: f32, b: f32) -> f32 {
 }
 fn rsqrts_d(a: f64, b: f64) -> f64 {
     if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-        1.5
+        return 1.5;
+    }
+    // (3 - a*b)/2 with the halving folded into one rounding (no f128 available).
+    let r = (-a).mul_add(b, 3.0);
+    if r.is_infinite() {
+        // The unhalved sum overflowed but the halved result is finite; halve the
+        // product first. `b * 0.5` is exact for the large-magnitude b that drives
+        // the overflow, so this rounds exactly once.
+        (-a).mul_add(b * 0.5, 1.5)
     } else {
-        (-a).mul_add(b, 3.0) * 0.5
+        r * 0.5
     }
 }
 
