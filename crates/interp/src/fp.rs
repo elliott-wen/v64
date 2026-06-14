@@ -8,6 +8,7 @@
 use aarch64_cpu_state::{CpuState, Flags};
 
 use crate::cond::eval_cond;
+use crate::fp_round::{round_f32, round_f64, Mode};
 
 const DEFAULT_NAN_32: u32 = 0x7FC0_0000;
 const DEFAULT_NAN_64: u64 = 0x7FF8_0000_0000_0000;
@@ -53,7 +54,7 @@ pub(crate) fn dp1(cpu: &mut CpuState, ftype: u8, opcode: u8, rn: u8, rd: u8) -> 
             2 => write_s(cpu, rd, x.to_bits() ^ 0x8000_0000), // FNEG (flip sign)
             3 => write_s(cpu, rd, canon_s(x.sqrt())),         // FSQRT
             5 => write_d(cpu, rd, canon_d(f64::from(x))),     // FCVT single->double
-            _ => return None,
+            _ => write_s(cpu, rd, canon_s(round_f32(x, frint_mode(opcode)))), // FRINT*
         }
     } else {
         let x = read_d(cpu, rn);
@@ -63,10 +64,22 @@ pub(crate) fn dp1(cpu: &mut CpuState, ftype: u8, opcode: u8, rn: u8, rd: u8) -> 
             2 => write_d(cpu, rd, x.to_bits() ^ 0x8000_0000_0000_0000),
             3 => write_d(cpu, rd, canon_d(x.sqrt())),
             4 => write_s(cpu, rd, canon_s(x as f32)), // FCVT double->single
-            _ => return None,
+            _ => write_d(cpu, rd, canon_d(round_f64(x, frint_mode(opcode)))), // FRINT*
         }
     }
     None
+}
+
+/// FP 1-source FRINT opcode -> rounding mode.
+fn frint_mode(opcode: u8) -> Mode {
+    match opcode {
+        0x8 => Mode::Near,  // FRINTN
+        0x9 => Mode::Ceil,  // FRINTP
+        0xa => Mode::Floor, // FRINTM
+        0xb => Mode::Trunc, // FRINTZ
+        0xc => Mode::Away,  // FRINTA
+        _ => Mode::Near,    // FRINTX (0xe) / FRINTI (0xf): current mode = nearest-even
+    }
 }
 
 pub(crate) fn dp2(
@@ -240,7 +253,7 @@ pub(crate) fn cvt_int(
     cpu: &mut CpuState,
     sf: bool,
     ftype: u8,
-    _rmode: u8,
+    rmode: u8,
     opcode: u8,
     rn: u8,
     rd: u8,
@@ -253,10 +266,22 @@ pub(crate) fn cvt_int(
             let gpr = cpu.read_gpr(rn, false);
             int_to_fp(cpu, rd, is_single, sf, signed, gpr);
         }
-        // FCVTZS / FCVTZU: FP -> integer, round toward zero (saturating).
+        // FCVT{N,P,M,Z}{S,U}: FP -> integer with the rmode rounding (saturating).
         0b000 | 0b001 => {
             let signed = opcode == 0b000;
-            let result = fp_to_int(cpu, rn, is_single, sf, signed);
+            let mode = match rmode {
+                0b00 => Mode::Near,
+                0b01 => Mode::Ceil,
+                0b10 => Mode::Floor,
+                _ => Mode::Trunc,
+            };
+            let result = fp_to_int(cpu, rn, is_single, sf, signed, mode);
+            write_gpr(cpu, rd, sf, result);
+        }
+        // FCVTAS / FCVTAU: tie-away rounding.
+        0b100 | 0b101 => {
+            let signed = opcode == 0b100;
+            let result = fp_to_int(cpu, rn, is_single, sf, signed, Mode::Away);
             write_gpr(cpu, rd, sf, result);
         }
         // FMOV gpr <-> fpr.
@@ -297,13 +322,14 @@ fn int_to_fp(cpu: &mut CpuState, rd: u8, is_single: bool, sf: bool, signed: bool
     }
 }
 
-/// FP -> integer with round-toward-zero. Rust's saturating `as` casts match the
-/// ARM FCVTZS/FCVTZU semantics (NaN -> 0, out-of-range -> saturate).
-fn fp_to_int(cpu: &CpuState, rn: u8, is_single: bool, sf: bool, signed: bool) -> u64 {
+/// FP -> integer, rounding per `mode` then saturating. Rust's saturating `as`
+/// casts match the ARM semantics (NaN -> 0, out-of-range -> saturate). Rounding
+/// is done on the source-width float to match QEMU.
+fn fp_to_int(cpu: &CpuState, rn: u8, is_single: bool, sf: bool, signed: bool, mode: Mode) -> u64 {
     let val = if is_single {
-        f64::from(read_s(cpu, rn))
+        f64::from(round_f32(read_s(cpu, rn), mode))
     } else {
-        read_d(cpu, rn)
+        round_f64(read_d(cpu, rn), mode)
     };
     match (sf, signed) {
         (true, true) => val as i64 as u64,

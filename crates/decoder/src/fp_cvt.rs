@@ -16,7 +16,10 @@ pub(crate) fn decode(word: u32) -> Insn {
 
     let valid = match (rmode, opcode) {
         (0b00, 0b010) | (0b00, 0b011) => true, // SCVTF / UCVTF
-        (0b11, 0b000) | (0b11, 0b001) => true, // FCVTZS / FCVTZU
+        // FCVT{N,P,M,Z}{S,U}: any rmode with opcode 000/001.
+        (_, 0b000) | (_, 0b001) => true,
+        // FCVTAS / FCVTAU: tie-away, rmode encoded as 00 with opcode 100/101.
+        (0b00, 0b100) | (0b00, 0b101) => true,
         // FMOV gpr<->fpr: W<->S (sf=0, single) or X<->D (sf=1, double).
         (0b00, 0b110) | (0b00, 0b111) => (!sf && ftype == 0b00) || (sf && ftype == 0b01),
         _ => false,

@@ -30,6 +30,7 @@ mod data_proc_2src;
 mod data_proc_3src;
 mod extract;
 mod fp;
+mod fp_round;
 mod ldst;
 mod ldst_atomic;
 mod ldst_cas;

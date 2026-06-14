@@ -40,8 +40,12 @@ fn enc(word: u32, rng: &mut Rng) -> FpEncoded {
 
 fn fp_dp1(rng: &mut Rng) -> FpEncoded {
     let ftype = rng.below(2);
-    // FMOV/FABS/FNEG/FSQRT keep the type; FCVT flips single<->double.
-    let choices: &[u32] = if ftype == 0 { &[0, 1, 2, 3, 5] } else { &[0, 1, 2, 3, 4] };
+    // FMOV/FABS/FNEG/FSQRT keep the type; FCVT flips single<->double; FRINT* keep.
+    let choices: &[u32] = if ftype == 0 {
+        &[0, 1, 2, 3, 5, 0x8, 0x9, 0xa, 0xb, 0xc, 0xe, 0xf]
+    } else {
+        &[0, 1, 2, 3, 4, 0x8, 0x9, 0xa, 0xb, 0xc, 0xe, 0xf]
+    };
     let opcode = choices[rng.below(choices.len() as u32) as usize];
     let word =
         FP_HDR | (ftype << 22) | (1 << 21) | (opcode << 15) | (0b10000 << 10) | (reg(rng) << 5) | reg(rng);
@@ -93,13 +97,15 @@ fn fp_imm(rng: &mut Rng) -> FpEncoded {
 }
 
 fn fp_cvt(rng: &mut Rng) -> FpEncoded {
-    // 0 SCVTF, 1 UCVTF, 2 FCVTZS, 3 FCVTZU, 4 FMOV.
+    // SCVTF/UCVTF, FCVT{N,P,M,Z,A}{S,U}, FMOV.
     let (mut sf, mut ftype) = (rng.below(2), rng.below(2));
-    let (rmode, opcode) = match rng.below(5) {
-        0 => (0b00, 0b010),
-        1 => (0b00, 0b011),
-        2 => (0b11, 0b000),
-        3 => (0b11, 0b001),
+    let (rmode, opcode) = match rng.below(9) {
+        0 => (0b00, 0b010), // SCVTF
+        1 => (0b00, 0b011), // UCVTF
+        2 => (rng.below(4), 0b000), // FCVT{N,P,M,Z}S
+        3 => (rng.below(4), 0b001), // FCVT{N,P,M,Z}U
+        4 => (0b00, 0b100), // FCVTAS
+        5 => (0b00, 0b101), // FCVTAU
         _ => {
             // FMOV requires matching width: W<->S or X<->D.
             if rng.below(2) == 0 {

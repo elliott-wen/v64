@@ -14,7 +14,9 @@ pub(crate) fn decode(word: u32) -> Insn {
         // FCVT to single (from double) / to double (from single).
         4 => ftype == 0b01,
         5 => ftype == 0b00,
-        _ => false, // FCVT-to-half, FRINT*, etc. not implemented
+        // FRINTN/P/M/Z/A/X/I (0xd unallocated).
+        0x8..=0xc | 0xe | 0xf => ftype_ok(ftype),
+        _ => false, // FCVT-to-half, FRINT32/64, etc. not implemented
     };
     if !valid {
         return Insn::Unsupported { word };
