@@ -55,6 +55,7 @@ mod simd_shift_fp;
 mod simd_shift_imm;
 mod simd_shift_long;
 mod simd_shift_narrow;
+mod simd_tbl;
 mod simd_three_diff;
 mod simd_three_same;
 mod simd_three_same_fp;

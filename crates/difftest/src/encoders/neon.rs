@@ -28,6 +28,7 @@ pub(super) fn classes() -> Vec<FpClass> {
         FpClass { name: "neon_mov_gpr", encode: mov_gpr },
         FpClass { name: "neon_zip_trn", encode: zip_trn },
         FpClass { name: "neon_ext", encode: ext },
+        FpClass { name: "neon_tbl", encode: tbl },
         FpClass { name: "neon_shift_imm", encode: shift_imm },
         FpClass { name: "neon_across", encode: across },
         FpClass { name: "neon_scalar_three_same", encode: scalar_three_same },
@@ -353,6 +354,20 @@ fn zip_trn(rng: &mut Rng) -> FpEncoded {
         | (rng.bits(5) << 16)
         | (opcode << 12)
         | (1 << 11)
+        | (rng.bits(5) << 5)
+        | rng.bits(5);
+    enc(word, rng)
+}
+
+fn tbl(rng: &mut Rng) -> FpEncoded {
+    let q = rng.below(2);
+    let len = rng.below(4);
+    let op = rng.below(2); // TBL / TBX
+    let word = (q << 30)
+        | (0b001110 << 24)
+        | (rng.bits(5) << 16)
+        | (len << 13)
+        | (op << 12)
         | (rng.bits(5) << 5)
         | rng.bits(5);
     enc(word, rng)

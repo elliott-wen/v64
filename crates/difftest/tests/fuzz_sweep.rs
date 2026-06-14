@@ -132,6 +132,7 @@ fp_class_tests!(
     neon_mov_gpr,
     neon_zip_trn,
     neon_ext,
+    neon_tbl,
     neon_shift_imm,
     neon_across,
     neon_scalar_three_same,

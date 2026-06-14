@@ -13,7 +13,7 @@ use crate::{
     branch_reg, compare_branch, cond_branch, cond_compare, cond_select, data_proc_1src,
     data_proc_2src, data_proc_3src, exception, extract, fp, ldst, ldst_atomic, ldst_cas, ldst_excl,
     ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, simd_across, simd_copy, simd_dup,
-    simd_ext, simd_indexed,
+    simd_ext, simd_indexed, simd_tbl,
     simd_mod_imm, simd_permute, simd_scalar, simd_shift_imm, simd_three_diff, simd_three_same,
     simd_three_same_fp, simd_two_reg_misc, simd_two_reg_misc_fp, system, test_branch,
 };
@@ -103,6 +103,9 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
         }
         Insn::SimdIndexed { q, u, size, opcode, index, rm, rn, rd } => {
             simd_indexed::exec(cpu, q, u, size, opcode, index, rm, rn, rd)
+        }
+        Insn::SimdTableLookup { q, is_tbx, len, rm, rn, rd } => {
+            simd_tbl::exec(cpu, q, is_tbx, len, rm, rn, rd)
         }
         Insn::SimdScalarThreeSame { u, size, opcode, rm, rn, rd } => {
             simd_scalar::three_same(cpu, u, size, opcode, rm, rn, rd)

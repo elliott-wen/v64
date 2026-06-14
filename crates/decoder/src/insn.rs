@@ -262,6 +262,9 @@ pub enum Insn {
     /// `opcode` is bits[15:12]; `index` is the decoded element index into Vm.
     SimdIndexed { q: bool, u: bool, size: u8, opcode: u8, index: u8, rm: u8, rn: u8, rd: u8 },
 
+    /// Advanced SIMD table lookup TBL/TBX over `len+1` consecutive registers.
+    SimdTableLookup { q: bool, is_tbx: bool, len: u8, rm: u8, rn: u8, rd: u8 },
+
     /// Advanced SIMD scalar three-same: a single-element op (the vector
     /// arithmetic on lane 0, with the rest of the register zeroed).
     SimdScalarThreeSame { u: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },

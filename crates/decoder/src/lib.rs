@@ -69,6 +69,7 @@ mod neon_indexed;
 mod neon_mod_imm;
 mod neon_scalar;
 mod neon_shift_imm;
+mod neon_tbl;
 mod neon_three_diff;
 mod neon_three_same;
 mod neon_three_same_fp;
