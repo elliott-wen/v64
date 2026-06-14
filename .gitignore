@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target
+**/target
+
+# Backup / editor files
+*.swp
+*.swo
+*~
+
+# OS clutter
+.DS_Store

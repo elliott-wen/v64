@@ -1,0 +1,9 @@
+[package]
+name = "aarch64-decoder"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "aarch64_decoder"
+path = "src/lib.rs"

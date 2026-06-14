@@ -1,0 +1,9 @@
+[package]
+name = "aarch64-cpu-state"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "aarch64_cpu_state"
+path = "src/lib.rs"

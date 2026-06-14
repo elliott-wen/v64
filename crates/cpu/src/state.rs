@@ -1,0 +1,163 @@
+//! Architectural register state for a single AArch64 core (EL0 subset).
+
+use std::collections::BTreeMap;
+
+use crate::flags::Flags;
+
+/// Encoded register index that aliases SP or the zero register.
+pub const SP_OR_ZR: u8 = 31;
+
+/// Architectural state of a single AArch64 core (EL0 subset).
+///
+/// Register index 31 is special: depending on the instruction it means either
+/// the zero register (`XZR`/`WZR`, reads as 0 and discards writes) or the stack
+/// pointer (`SP`). Callers select which via the `sp` flag on [`Self::read_gpr`]
+/// / [`Self::write_gpr`].
+#[derive(Debug, Clone)]
+pub struct CpuState {
+    /// X0..X30. X31 is *not* stored here — see [`Self::read_gpr`].
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub flags: Flags,
+    /// SIMD/FP registers V0..V31 (128-bit). Scalar FP uses the low bits.
+    pub v: [u128; 32],
+    /// Floating-point control register (rounding mode, default-NaN, etc.).
+    pub fpcr: u64,
+    /// Exclusive monitor: `(address, value)` recorded by LDXR; a later STXR to
+    /// the same address succeeds only if memory still holds `value`.
+    pub excl: Option<(u64, u64)>,
+    /// System registers, keyed by the encoded (op0,op1,CRn,CRm,op2) tuple.
+    /// Read/written by MRS/MSR. The foundation of the system-mode model.
+    pub sysregs: BTreeMap<u32, u64>,
+    /// Current exception level (0 = EL0 user, 1 = EL1 kernel, ...).
+    pub el: u8,
+    /// Stack-pointer select: false = SP_EL0, true = SP_ELx.
+    pub spsel: bool,
+    /// Interrupt mask bits packed as `[D,A,I,F]` in the low 4 bits.
+    pub daif: u8,
+    /// Banked stack pointers SP_EL0..SP_EL3. The *active* one mirrors `sp`; the
+    /// others hold the saved value. See [`Self::set_el_spsel`].
+    pub sp_el: [u64; 4],
+}
+
+impl Default for CpuState {
+    fn default() -> Self {
+        Self {
+            x: [0; 31],
+            sp: 0,
+            pc: 0,
+            flags: Flags::default(),
+            v: [0; 32],
+            fpcr: 0,
+            excl: None,
+            sysregs: BTreeMap::new(),
+            el: 1,
+            spsel: true,
+            daif: 0,
+            sp_el: [0; 4],
+        }
+    }
+}
+
+impl CpuState {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read a general-purpose register. When `idx == 31`, `sp` chooses between
+    /// the stack pointer (`true`) and the zero register (`false`, reads 0).
+    #[must_use]
+    pub fn read_gpr(&self, idx: u8, sp: bool) -> u64 {
+        match idx {
+            SP_OR_ZR if sp => self.sp,
+            SP_OR_ZR => 0,
+            n => self.x[n as usize],
+        }
+    }
+
+    /// Write a general-purpose register. When `idx == 31`, `sp` chooses between
+    /// the stack pointer (`true`) and the zero register (`false`, write
+    /// discarded).
+    pub fn write_gpr(&mut self, idx: u8, sp: bool, val: u64) {
+        match idx {
+            SP_OR_ZR if sp => self.sp = val,
+            SP_OR_ZR => {}
+            n => self.x[n as usize] = val,
+        }
+    }
+
+    /// Read a register in 32-bit (`W`) view: the low 32 bits, zero-extended.
+    #[must_use]
+    pub fn read_gpr_w(&self, idx: u8, sp: bool) -> u64 {
+        self.read_gpr(idx, sp) & 0xffff_ffff
+    }
+
+    /// Write a 32-bit (`W`) result. Writing a W register zeroes the top half of
+    /// the X register, per the architecture.
+    pub fn write_gpr_w(&mut self, idx: u8, sp: bool, val: u64) {
+        self.write_gpr(idx, sp, val & 0xffff_ffff);
+    }
+
+    /// Index of the currently active banked stack pointer (SP_EL0 when SPSel=0).
+    #[must_use]
+    pub fn sp_index(&self) -> usize {
+        if self.spsel {
+            self.el as usize
+        } else {
+            0
+        }
+    }
+
+    /// Change EL and/or SPSel, banking the stack pointer so `sp` always mirrors
+    /// the active SP.
+    pub fn set_el_spsel(&mut self, el: u8, spsel: bool) {
+        let old = self.sp_index();
+        self.el = el;
+        self.spsel = spsel;
+        let new = self.sp_index();
+        if old != new {
+            self.sp_el[old] = self.sp;
+            self.sp = self.sp_el[new];
+        }
+    }
+
+    /// Read a banked SP_ELx (the active one lives in `sp`).
+    #[must_use]
+    pub fn read_sp_el(&self, idx: usize) -> u64 {
+        if idx == self.sp_index() {
+            self.sp
+        } else {
+            self.sp_el[idx]
+        }
+    }
+
+    /// Write a banked SP_ELx.
+    pub fn write_sp_el(&mut self, idx: usize, val: u64) {
+        if idx == self.sp_index() {
+            self.sp = val;
+        } else {
+            self.sp_el[idx] = val;
+        }
+    }
+
+    /// Pack the current PSTATE into the AArch64 SPSR layout: NZCV at [31:28],
+    /// DAIF at [9:6], and M[3:0] = EL<<2 | SPSel (M[4]=0 for AArch64).
+    #[must_use]
+    pub fn pstate(&self) -> u64 {
+        self.flags.to_nzcv()
+            | (u64::from(self.daif) << 6)
+            | (u64::from(self.el) << 2)
+            | u64::from(self.spsel)
+    }
+
+    /// Restore PSTATE from a packed SPSR value (used by ERET).
+    pub fn set_pstate(&mut self, v: u64) {
+        self.flags = Flags::from_nzcv(v);
+        self.daif = ((v >> 6) & 0xf) as u8;
+        let el = ((v >> 2) & 0x3) as u8;
+        let spsel = v & 1 == 1;
+        self.set_el_spsel(el, spsel);
+    }
+}

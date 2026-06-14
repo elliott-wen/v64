@@ -1,0 +1,25 @@
+[package]
+name = "aarch64-difftest"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "aarch64_difftest"
+path = "src/lib.rs"
+
+[dependencies]
+aarch64-cpu-state.workspace = true
+aarch64-interp.workspace = true
+
+# Unicorn is the differential oracle. It builds QEMU via cmake, which is heavy,
+# so it is opt-in: `cargo test -p aarch64-difftest --features unicorn`.
+[dependencies.unicorn-engine]
+path = "../../../unicorn/bindings/rust/unicorn-engine"
+optional = true
+default-features = false        # avoid arch_all (builds all 10 archs)
+features = ["arch_aarch64"]     # only what the oracle needs
+
+[features]
+default = []
+unicorn = ["dep:unicorn-engine"]

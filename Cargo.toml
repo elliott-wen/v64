@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cpu",
+    "crates/decoder",
+    "crates/interp",
+    "crates/difftest",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+aarch64-cpu-state = { path = "crates/cpu" }
+aarch64-decoder = { path = "crates/decoder" }
+aarch64-interp = { path = "crates/interp" }

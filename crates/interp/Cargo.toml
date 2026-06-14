@@ -1,0 +1,13 @@
+[package]
+name = "aarch64-interp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "aarch64_interp"
+path = "src/lib.rs"
+
+[dependencies]
+aarch64-cpu-state.workspace = true
+aarch64-decoder.workspace = true
