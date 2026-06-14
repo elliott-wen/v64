@@ -13,22 +13,34 @@ pub(crate) fn decode(word: u32) -> Insn {
     };
     let nalloc = idx == 0b000;
     let is_load = field(word, 22, 1) == 1;
+    let vec = field(word, 26, 1) == 1;
 
-    // opc: 00 = 32-bit, 10 = 64-bit, 01 = LDPSW (load only, no non-allocating
-    // form), 11 reserved.
-    let (width8, signed) = match field(word, 30, 2) {
-        0b00 => (false, false),
-        0b10 => (true, false),
-        0b01 if is_load && !nalloc => (false, true),
-        _ => return Insn::Unsupported { word },
+    let (width8, signed, vesize) = if vec {
+        // SIMD pair: opc 00=S(2), 01=D(3), 10=Q(4).
+        let vesize = match field(word, 30, 2) {
+            0b00 => 2u8,
+            0b01 => 3,
+            0b10 => 4,
+            _ => return Insn::Unsupported { word },
+        };
+        (false, false, vesize)
+    } else {
+        // opc: 00 = 32-bit, 10 = 64-bit, 01 = LDPSW (load only, no non-alloc), 11 reserved.
+        match field(word, 30, 2) {
+            0b00 => (false, false, 2),
+            0b10 => (true, false, 3),
+            0b01 if is_load && !nalloc => (false, true, 2),
+            _ => return Insn::Unsupported { word },
+        }
     };
 
-    let scale = if width8 { 3 } else { 2 };
-    let offset = sfield(word, 15, 7) << scale;
+    let offset = sfield(word, 15, 7) << vesize;
     Insn::LoadStorePair {
         is_load,
         signed,
         width8,
+        vec,
+        vesize,
         rt: field(word, 0, 5) as u8,
         rt2: field(word, 10, 5) as u8,
         rn: field(word, 5, 5) as u8,

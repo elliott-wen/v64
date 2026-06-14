@@ -163,13 +163,15 @@ pub enum Insn {
     BranchReg { opc: u8, rn: u8 },
 
     /// Load/store a single register. `size` is log2 of the access width in bytes
-    /// (0=byte..3=dword); `signed` sign-extends loaded values; `dst64` selects
-    /// the X vs W result width for loads.
+    /// (0=byte..3=dword, 4=128-bit Q for `vec`); `signed` sign-extends loaded
+    /// values; `dst64` selects the X vs W result width for loads. When `vec`,
+    /// the register is a SIMD/FP register `V[rt]` (no sign extension).
     LoadStore {
         size: u8,
         is_load: bool,
         signed: bool,
         dst64: bool,
+        vec: bool,
         rt: u8,
         addr: AddrMode,
     },
@@ -191,11 +193,14 @@ pub enum Insn {
 
     /// Load/store pair. `width8` selects 8-byte (X) vs 4-byte (W) elements;
     /// `signed` is LDPSW (4-byte signed elements into X registers). `offset` is
-    /// the already-scaled byte displacement.
+    /// the already-scaled byte displacement. When `vec`, the operands are SIMD/FP
+    /// registers and `vesize` is log2 of the element width (2=S,3=D,4=Q).
     LoadStorePair {
         is_load: bool,
         signed: bool,
         width8: bool,
+        vec: bool,
+        vesize: u8,
         rt: u8,
         rt2: u8,
         rn: u8,
@@ -264,6 +269,37 @@ pub enum Insn {
 
     /// Advanced SIMD table lookup TBL/TBX over `len+1` consecutive registers.
     SimdTableLookup { q: bool, is_tbx: bool, len: u8, rm: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD load/store multiple structures (LD1-4/ST1-4). `rpt`
+    /// register iterations of `selem` interleaved structure elements. `postidx`
+    /// with `rm==31` increments by the transfer size, else by X[rm].
+    SimdLdStMulti {
+        is_load: bool,
+        q: bool,
+        postidx: bool,
+        rm: u8,
+        rn: u8,
+        rt: u8,
+        size: u8,
+        rpt: u8,
+        selem: u8,
+    },
+
+    /// Advanced SIMD load/store single structure / replicate (LD1..4 single
+    /// lane, LD1R..LD4R). `selem` = structure size, `index` = the lane,
+    /// `replicate` = the LDxR broadcast form.
+    SimdLdStSingle {
+        is_load: bool,
+        replicate: bool,
+        postidx: bool,
+        rm: u8,
+        rn: u8,
+        rt: u8,
+        size: u8,
+        selem: u8,
+        index: u8,
+        q: bool,
+    },
 
     /// Advanced SIMD scalar three-same: a single-element op (the vector
     /// arithmetic on lane 0, with the rest of the register zeroed).

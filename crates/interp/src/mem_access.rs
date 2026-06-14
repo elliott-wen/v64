@@ -27,3 +27,21 @@ pub(crate) fn write(cpu: &CpuState, mem: &mut Memory, va: u64, size: u8, val: u6
         _ => mem.write_u64(pa, val),
     }
 }
+
+/// Read `1 << log2` bytes (log2 0..=4) into a u128, for SIMD/FP accesses.
+pub(crate) fn read_vec(cpu: &CpuState, mem: &Memory, va: u64, log2: u8) -> u128 {
+    let pa = mmu::translate(cpu, mem, va);
+    let mut v = 0u128;
+    for i in 0..(1u64 << log2) {
+        v |= u128::from(mem.read_u8(pa + i)) << (i * 8);
+    }
+    v
+}
+
+/// Write the low `1 << log2` bytes of `val` to memory.
+pub(crate) fn write_vec(cpu: &CpuState, mem: &mut Memory, va: u64, log2: u8, val: u128) {
+    let pa = mmu::translate(cpu, &*mem, va);
+    for i in 0..(1u64 << log2) {
+        mem.write_u8(pa + i, (val >> (i * 8)) as u8);
+    }
+}

@@ -13,7 +13,7 @@ use crate::{
     branch_reg, compare_branch, cond_branch, cond_compare, cond_select, data_proc_1src,
     data_proc_2src, data_proc_3src, exception, extract, fp, ldst, ldst_atomic, ldst_cas, ldst_excl,
     ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, simd_across, simd_copy, simd_dup,
-    simd_ext, simd_indexed, simd_tbl,
+    simd_ext, simd_indexed, simd_ldst_struct, simd_tbl,
     simd_mod_imm, simd_permute, simd_scalar, simd_shift_imm, simd_three_diff, simd_three_same,
     simd_three_same_fp, simd_two_reg_misc, simd_two_reg_misc_fp, system, test_branch,
 };
@@ -64,11 +64,11 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
             test_branch::exec(cpu, bit, negate, rt, offset, pc)
         }
         Insn::BranchReg { opc, rn } => branch_reg::exec(cpu, opc, rn, pc),
-        Insn::LoadStore { size, is_load, signed, dst64, rt, addr } => {
-            ldst::exec(cpu, mem, size, is_load, signed, dst64, rt, addr, pc)
+        Insn::LoadStore { size, is_load, signed, dst64, vec, rt, addr } => {
+            ldst::exec(cpu, mem, size, is_load, signed, dst64, vec, rt, addr, pc)
         }
-        Insn::LoadStorePair { is_load, signed, width8, rt, rt2, rn, offset, index } => {
-            ldst_pair::exec(cpu, mem, is_load, signed, width8, rt, rt2, rn, offset, index)
+        Insn::LoadStorePair { is_load, signed, width8, vec, vesize, rt, rt2, rn, offset, index } => {
+            ldst_pair::exec(cpu, mem, is_load, signed, width8, vec, vesize, rt, rt2, rn, offset, index)
         }
         Insn::AtomicRmw { size, op, rs, rn, rt } => {
             ldst_atomic::exec(cpu, mem, size, op, rs, rn, rt)
@@ -106,6 +106,14 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
         }
         Insn::SimdTableLookup { q, is_tbx, len, rm, rn, rd } => {
             simd_tbl::exec(cpu, q, is_tbx, len, rm, rn, rd)
+        }
+        Insn::SimdLdStMulti { is_load, q, postidx, rm, rn, rt, size, rpt, selem } => {
+            simd_ldst_struct::multi(cpu, mem, is_load, q, postidx, rm, rn, rt, size, rpt, selem)
+        }
+        Insn::SimdLdStSingle { is_load, replicate, postidx, rm, rn, rt, size, selem, index, q } => {
+            simd_ldst_struct::single(
+                cpu, mem, is_load, replicate, postidx, rm, rn, rt, size, selem, index, q,
+            )
         }
         Insn::SimdScalarThreeSame { u, size, opcode, rm, rn, rd } => {
             simd_scalar::three_same(cpu, u, size, opcode, rm, rn, rd)

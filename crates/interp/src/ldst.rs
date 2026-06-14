@@ -18,11 +18,26 @@ pub(crate) fn exec(
     is_load: bool,
     signed: bool,
     dst64: bool,
+    vec: bool,
     rt: u8,
     addr: AddrMode,
     pc: u64,
 ) -> Option<u64> {
     let (ea, writeback) = effective_address(cpu, addr, pc);
+
+    if vec {
+        // SIMD/FP register access: `size` is log2 bytes (0..=4). Loads zero the
+        // rest of the V register; no sign extension.
+        if is_load {
+            cpu.v[rt as usize] = mem_access::read_vec(cpu, mem, ea, size);
+        } else {
+            mem_access::write_vec(cpu, mem, ea, size, cpu.v[rt as usize]);
+        }
+        if let Some((rn, new_base)) = writeback {
+            cpu.write_gpr(rn, true, new_base);
+        }
+        return None;
+    }
 
     if is_load {
         let raw = mem_access::read(cpu, mem, ea, size);

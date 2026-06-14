@@ -13,6 +13,8 @@ pub(crate) fn exec(
     is_load: bool,
     signed: bool,
     width8: bool,
+    vec: bool,
+    vesize: u8,
     rt: u8,
     rt2: u8,
     rn: u8,
@@ -24,6 +26,22 @@ pub(crate) fn exec(
         PairIndex::Post => base,
         PairIndex::Offset | PairIndex::Pre => base.wrapping_add(offset as u64),
     };
+
+    if vec {
+        let step = 1u64 << vesize;
+        if is_load {
+            cpu.v[rt as usize] = mem_access::read_vec(cpu, mem, ea, vesize);
+            cpu.v[rt2 as usize] = mem_access::read_vec(cpu, mem, ea + step, vesize);
+        } else {
+            mem_access::write_vec(cpu, mem, ea, vesize, cpu.v[rt as usize]);
+            mem_access::write_vec(cpu, mem, ea + step, vesize, cpu.v[rt2 as usize]);
+        }
+        if matches!(index, PairIndex::Pre | PairIndex::Post) {
+            cpu.write_gpr(rn, true, base.wrapping_add(offset as u64));
+        }
+        return None;
+    }
+
     let esize = if width8 { 8 } else { 4 };
 
     if is_load {

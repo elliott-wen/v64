@@ -52,6 +52,8 @@ pub struct MemEncoded {
     pub word: u32,
     /// `(reg, value)` overrides applied after random seeding. `reg == 31` is SP.
     pub seeds: Vec<(u8, u64)>,
+    /// `(vreg, value)` SIMD/FP register seeds (for SIMD stores).
+    pub init_v: Vec<(u8, u128)>,
     pub data: Vec<u8>,
 }
 
@@ -199,6 +201,13 @@ pub fn fuzz_mem_class(class: &MemClass, iters: u32, seed: u64) -> Result<FuzzRep
             }
         }
         tv.init_data = Some(enc.data);
+        if !enc.init_v.is_empty() {
+            let mut v = [0u128; 32];
+            for (reg, val) in &enc.init_v {
+                v[*reg as usize] = *val;
+            }
+            tv.init_v = Some(v);
+        }
         let here = || format!("class `{}` iter {i} word {word:#010x} (seed {seed:#x})", class.name);
         tally(step(&tv, &here)?, &mut compared, &mut reserved, &mut faulted);
     }

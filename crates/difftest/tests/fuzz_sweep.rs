@@ -96,6 +96,10 @@ mem_class_tests!(
     ldst_ordered,
     ldst_atomic,
     ldst_cas,
+    ldst_vec_reg,
+    ldst_vec_pair,
+    ldst_struct_multi,
+    ldst_struct_single,
 );
 
 /// One `#[test]` per FP class.

@@ -58,6 +58,7 @@ mod ldst_pair;
 mod ldst_post;
 mod ldst_pre;
 mod ldst_reg;
+mod ldst_struct;
 mod ldst_uimm;
 mod ldst_unscaled;
 

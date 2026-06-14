@@ -48,6 +48,7 @@ mod simd_copy;
 mod simd_dup;
 mod simd_ext;
 mod simd_indexed;
+mod simd_ldst_struct;
 mod simd_mod_imm;
 mod simd_permute;
 mod simd_scalar;

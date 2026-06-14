@@ -35,6 +35,7 @@ pub(crate) fn decode(word: u32) -> Insn {
             is_load: l == 1, // LDAR vs STLR
             signed: false,
             dst64: size == 3,
+            vec: false,
             rt: field(word, 0, 5) as u8,
             addr: AddrMode::UnsignedImm { rn: field(word, 5, 5) as u8, imm: 0 },
         };

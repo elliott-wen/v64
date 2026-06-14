@@ -7,8 +7,8 @@
 use crate::bits::field;
 use crate::insn::Insn;
 use crate::{
-    ldst_atomic, ldst_excl, ldst_literal, ldst_pair, ldst_post, ldst_pre, ldst_reg, ldst_uimm,
-    ldst_unscaled,
+    ldst_atomic, ldst_excl, ldst_literal, ldst_pair, ldst_post, ldst_pre, ldst_reg, ldst_struct,
+    ldst_uimm, ldst_unscaled,
 };
 
 pub(crate) fn decode(word: u32) -> Insn {
@@ -16,9 +16,10 @@ pub(crate) fn decode(word: u32) -> Insn {
     if field(word, 24, 6) == 0b001000 {
         return ldst_excl::decode(word);
     }
-    // SIMD/FP load/store (V=1) is not implemented yet.
-    if field(word, 26, 1) != 0 {
-        return Insn::Unsupported { word };
+    // Advanced SIMD load/store structures (LD1-4/ST1-4): bits[29:26]=0011,
+    // bit25=0. These have their own multi-register layout.
+    if field(word, 26, 4) == 0b0011 && field(word, 25, 1) == 0 {
+        return ldst_struct::decode(word);
     }
     match field(word, 27, 3) {
         0b111 => register_form(word),
@@ -63,4 +64,20 @@ pub(crate) fn kind(size: u8, opc: u32) -> Option<(bool, bool, bool)> {
         (_, 0b11) => Some((true, true, false)), // LDRS* to 32-bit
         _ => None,
     }
+}
+
+/// SIMD/FP register load/store (V=1). Returns `(is_load, log2_bytes)` where
+/// log2 is 0..4 (B,H,S,D,Q). `opc[1]` (bit 23) widens to 128-bit Q.
+pub(crate) fn vec_kind(size: u8, opc: u32) -> Option<(bool, u8)> {
+    let is_load = opc & 1 == 1;
+    let log2 = if opc & 0b10 != 0 {
+        if size == 0 {
+            4 // Q (128-bit)
+        } else {
+            return None; // unallocated
+        }
+    } else {
+        size
+    };
+    Some((is_load, log2))
 }
