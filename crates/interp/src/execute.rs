@@ -16,7 +16,8 @@ use crate::{
     simd_dup,
     simd_ext, simd_indexed, simd_ldst_struct, simd_sha, simd_tbl,
     simd_mod_imm, simd_permute, simd_scalar, simd_shift_imm, simd_three_diff, simd_three_same,
-    simd_three_same_fp, simd_two_reg_misc, simd_two_reg_misc_fp, system, test_branch,
+    simd_three_same_extra, simd_three_same_fp, simd_two_reg_misc, simd_two_reg_misc_fp, system,
+    test_branch,
 };
 
 pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64) -> Option<u64> {
@@ -111,6 +112,9 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
         Insn::CryptoAes { opcode, rn, rd } => simd_aes::exec(cpu, opcode, rn, rd),
         Insn::CryptoSha3 { opcode, rm, rn, rd } => simd_sha::three_reg(cpu, opcode, rm, rn, rd),
         Insn::CryptoSha2 { opcode, rn, rd } => simd_sha::two_reg(cpu, opcode, rn, rd),
+        Insn::SimdThreeSameExtra { q, u, size, opcode, rm, rn, rd } => {
+            simd_three_same_extra::exec(cpu, q, u, size, opcode, rm, rn, rd)
+        }
         Insn::SimdLdStMulti { is_load, q, postidx, rm, rn, rt, size, rpt, selem } => {
             simd_ldst_struct::multi(cpu, mem, is_load, q, postidx, rm, rn, rt, size, rpt, selem)
         }

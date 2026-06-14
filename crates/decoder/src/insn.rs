@@ -279,6 +279,10 @@ pub enum Insn {
     /// Crypto SHA, two registers: SHA1H(0)/SHA1SU1(1)/SHA256SU0(2).
     CryptoSha2 { opcode: u8, rn: u8, rd: u8 },
 
+    /// Advanced SIMD three-same extra: SQRDMLAH/SQRDMLSH (opcode 0/1, u=1) and
+    /// SDOT/UDOT (opcode 2).
+    SimdThreeSameExtra { q: bool, u: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
+
     /// Advanced SIMD load/store multiple structures (LD1-4/ST1-4). `rpt`
     /// register iterations of `selem` interleaved structure elements. `postidx`
     /// with `rm==31` increments by the transfer size, else by X[rm].

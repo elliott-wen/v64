@@ -32,6 +32,7 @@ pub(super) fn classes() -> Vec<FpClass> {
         FpClass { name: "neon_aes", encode: aes },
         FpClass { name: "neon_sha3", encode: sha3 },
         FpClass { name: "neon_sha2", encode: sha2 },
+        FpClass { name: "neon_three_same_extra", encode: three_same_extra },
         FpClass { name: "neon_shift_imm", encode: shift_imm },
         FpClass { name: "neon_across", encode: across },
         FpClass { name: "neon_scalar_three_same", encode: scalar_three_same },
@@ -365,6 +366,28 @@ fn zip_trn(rng: &mut Rng) -> FpEncoded {
 fn aes(rng: &mut Rng) -> FpEncoded {
     let opcode = 0x4 + rng.below(4); // AESE/AESD/AESMC/AESIMC
     let word = 0x4e28_0800 | (opcode << 12) | (rng.bits(5) << 5) | rng.bits(5);
+    enc(word, rng)
+}
+
+fn three_same_extra(rng: &mut Rng) -> FpEncoded {
+    let q = rng.below(2);
+    // (u, opcode, size).
+    let (u, opcode, size) = match rng.below(4) {
+        0 => (1, 0u32, 1 + rng.below(2)), // SQRDMLAH (size 1/2)
+        1 => (1, 1, 1 + rng.below(2)),    // SQRDMLSH
+        2 => (0, 2, 2),                   // SDOT
+        _ => (1, 2, 2),                   // UDOT
+    };
+    let word = (q << 30)
+        | (u << 29)
+        | (0b01110 << 24)
+        | (size << 22)
+        | (rng.bits(5) << 16)
+        | (1 << 15)
+        | (opcode << 11)
+        | (1 << 10)
+        | (rng.bits(5) << 5)
+        | rng.bits(5);
     enc(word, rng)
 }
 
