@@ -156,7 +156,7 @@ fn halving_sub(u: bool, x: u64, y: u64, ebits: u32) -> u64 {
 fn sat_add(u: bool, x: u64, y: u64, ebits: u32) -> u64 {
     let mask = width_mask(ebits);
     if u {
-        (x + y).min(mask)
+        ((x as u128 + y as u128).min(mask as u128)) as u64
     } else {
         let (lo, hi) = (-(1i128 << (ebits - 1)), (1i128 << (ebits - 1)) - 1);
         ((sx(x, ebits) as i128 + sx(y, ebits) as i128).clamp(lo, hi) as u64) & mask
@@ -191,14 +191,23 @@ fn reg_shift(opcode: u8, u: bool, x: u64, y: u64, ebits: u32, mask: u64) -> u64 
         if s >= 64 { 0 } else { (x << s) & mask }
     } else {
         let s = (-shift) as u32;
+        right_shift(rounding, u, x, ebits, s) & mask
+    }
+}
+
+/// A right shift by `s`: rounding past the element width rounds to 0; a plain
+/// shift replicates the sign (signed) or zero-fills (unsigned).
+fn right_shift(rounding: bool, u: bool, x: u64, ebits: u32, s: u32) -> u64 {
+    let v = if u { x as i128 } else { i128::from(sx(x, ebits)) };
+    if rounding {
         if s > ebits {
-            // Shift amount past the width: 0, except rounding can round to 0/±0.
-            if rounding && s == ebits + 1 { 0 } else { 0 }
+            0 // shifted entirely out; round-half term also vanishes
         } else {
-            let round = if rounding { 1i128 << (s - 1) } else { 0 };
-            let v = if u { x as i128 } else { sx(x, ebits) as i128 };
-            (((v + round) >> s) as u64) & mask
+            // A shift by exactly `ebits` can still round up to 1 (unsigned).
+            ((v + (1i128 << (s - 1))) >> s) as u64
         }
+    } else {
+        (v >> s.min(127)) as u64
     }
 }
 
@@ -208,21 +217,31 @@ fn sat_reg_shift(opcode: u8, u: bool, x: u64, y: u64, ebits: u32) -> u64 {
     let mask = width_mask(ebits);
     let rounding = opcode == 0b01011;
     let v = if u { x as i128 } else { i128::from(sx(x, ebits)) };
-
-    let result = if shift >= 0 {
-        v << shift
+    let (lo, hi) = if u {
+        (0i128, mask as i128)
     } else {
-        let s = (-shift) as u32;
-        let round = if rounding && s >= 1 { 1i128 << (s - 1) } else { 0 };
-        if s >= 128 { 0 } else { (v + round) >> s }
+        (-(1i128 << (ebits - 1)), (1i128 << (ebits - 1)) - 1)
     };
 
-    if u {
-        result.clamp(0, mask as i128) as u64
+    let result = if shift >= 0 {
+        let n = shift as u32;
+        if v != 0 && n >= 64 {
+            // A left shift this large always saturates; pick the sign-correct
+            // bound to avoid overflowing the i128 product.
+            if v > 0 { hi } else { lo }
+        } else {
+            v << n
+        }
     } else {
-        let (lo, hi) = (-(1i128 << (ebits - 1)), (1i128 << (ebits - 1)) - 1);
-        (result.clamp(lo, hi) as u64) & mask
-    }
+        let s = (-shift) as u32;
+        if rounding {
+            if s > ebits { 0 } else { (v + (1i128 << (s - 1))) >> s }
+        } else {
+            v >> s.min(127)
+        }
+    };
+
+    (result.clamp(lo, hi) as u64) & mask
 }
 
 fn sqdmulh(u: bool, x: u64, y: u64, ebits: u32) -> u64 {
