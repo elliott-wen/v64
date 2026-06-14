@@ -49,6 +49,7 @@ mod simd_ext;
 mod simd_mod_imm;
 mod simd_permute;
 mod simd_shift_imm;
+mod simd_three_diff;
 mod simd_three_same;
 mod simd_three_same_fp;
 mod simd_two_reg_misc;

@@ -67,6 +67,7 @@ mod neon_copy;
 mod neon_ext;
 mod neon_mod_imm;
 mod neon_shift_imm;
+mod neon_three_diff;
 mod neon_three_same;
 mod neon_three_same_fp;
 mod neon_two_reg_misc;

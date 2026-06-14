@@ -247,6 +247,10 @@ pub enum Insn {
     /// `sz` selects single vs double lanes; `fpopcode` is the 7-bit combined op.
     SimdThreeSameFp { q: bool, sz: bool, fpopcode: u8, rm: u8, rn: u8, rd: u8 },
 
+    /// Advanced SIMD three-different (widening/narrowing): SADDL/SMULL/UMLAL/
+    /// ADDHN/SQDMULL/PMULL/... `opcode` is bits[15:12]; Q selects the upper half.
+    SimdThreeDiff { q: bool, u: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
+
     /// Advanced SIMD permute: ZIP1/2, UZP1/2, TRN1/2. `opcode` is bits[14:12].
     SimdZipTrn { q: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
 

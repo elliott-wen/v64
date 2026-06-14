@@ -14,8 +14,8 @@ use crate::{
     data_proc_2src, data_proc_3src, exception, extract, fp, ldst, ldst_atomic, ldst_cas, ldst_excl,
     ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, simd_across, simd_copy, simd_dup,
     simd_ext,
-    simd_mod_imm, simd_permute, simd_shift_imm, simd_three_same, simd_three_same_fp,
-    simd_two_reg_misc, system, test_branch,
+    simd_mod_imm, simd_permute, simd_shift_imm, simd_three_diff, simd_three_same,
+    simd_three_same_fp, simd_two_reg_misc, system, test_branch,
 };
 
 pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64) -> Option<u64> {
@@ -91,6 +91,9 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
         }
         Insn::SimdThreeSameFp { q, sz, fpopcode, rm, rn, rd } => {
             simd_three_same_fp::exec(cpu, q, sz, fpopcode, rm, rn, rd)
+        }
+        Insn::SimdThreeDiff { q, u, size, opcode, rm, rn, rd } => {
+            simd_three_diff::exec(cpu, q, u, size, opcode, rm, rn, rd)
         }
         Insn::SimdAcrossLanes { q, u, size, opcode, rn, rd } => {
             simd_across::exec(cpu, q, u, size, opcode, rn, rd)

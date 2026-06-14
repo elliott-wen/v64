@@ -16,6 +16,7 @@ fn enc(word: u32, rng: &mut Rng) -> FpEncoded {
 pub(super) fn classes() -> Vec<FpClass> {
     vec![
         FpClass { name: "neon_three_same", encode: three_same },
+        FpClass { name: "neon_three_diff", encode: three_diff },
         FpClass { name: "neon_three_same_fp", encode: three_same_fp },
         FpClass { name: "neon_two_reg_misc", encode: two_reg_misc },
         FpClass { name: "neon_mod_imm", encode: mod_imm },
@@ -250,6 +251,30 @@ fn dup_general(rng: &mut Rng) -> FpEncoded {
         gpr_seeds: (0..31).map(|r| (r as u8, rng.next_u64())).collect(),
         fpcr: 0,
     }
+}
+
+fn three_diff(rng: &mut Rng) -> FpEncoded {
+    let q = rng.below(2);
+    // opcode (bits 15:12) with its (u, size) constraints.
+    let opcode = match rng.below(15) {
+        14 => 0b1110u32, // PMULL (U=0, size 0)
+        n => n,          // 0..13
+    };
+    let (u, size) = match opcode {
+        0b1001 | 0b1011 | 0b1101 => (0, 1 + rng.below(2)), // SQDM*: H/S only
+        0b1110 => (0, 0),                                  // PMULL: byte source
+        _ => (rng.below(2), rng.below(3)),                 // size 0..2
+    };
+    let word = (q << 30)
+        | (u << 29)
+        | (0b01110 << 24)
+        | (size << 22)
+        | (1 << 21)
+        | (rng.bits(5) << 16)
+        | (opcode << 12)
+        | (rng.bits(5) << 5)
+        | rng.bits(5);
+    enc(word, rng)
 }
 
 fn three_same(rng: &mut Rng) -> FpEncoded {
