@@ -288,7 +288,7 @@ pub(crate) fn imm(cpu: &mut CpuState, ftype: u8, imm8: u8, rd: u8) -> Option<u64
 }
 
 /// ARM `VFPExpandImm` for single precision.
-fn expand_imm_s(imm8: u8) -> u32 {
+pub(crate) fn expand_imm_s(imm8: u8) -> u32 {
     let a = u32::from(imm8 >> 7) & 1;
     let b = u32::from(imm8 >> 6) & 1;
     let rep5 = if b == 1 { 0b11111 } else { 0 };
@@ -298,7 +298,7 @@ fn expand_imm_s(imm8: u8) -> u32 {
 }
 
 /// ARM `VFPExpandImm` for double precision.
-fn expand_imm_d(imm8: u8) -> u64 {
+pub(crate) fn expand_imm_d(imm8: u8) -> u64 {
     let a = u64::from(imm8 >> 7) & 1;
     let b = u64::from(imm8 >> 6) & 1;
     let rep8 = if b == 1 { 0xff } else { 0 };

@@ -54,12 +54,13 @@ fn expand(op: bool, cmode: u8, imm8: u8) -> u64 {
         0b100 => rep16(i),
         0b101 => rep16(i << 8),
         0b110 => {
-            // Shifting ones: low byte(s) all ones.
+            // Shifting ones: low byte(s) all ones (cmode 1100 / 1101).
             let v = if cmode & 1 == 0 { (i << 8) | 0xff } else { (i << 16) | 0xffff };
             rep32(v)
         }
-        _ => {
-            // cmode 1110: MOVI byte-replicate (op=0) or bit-to-byte (op=1).
+        // cmode 1110 (cmode&1==0) and cmode 1111 (cmode&1==1, FMOV-vector).
+        _ if cmode & 1 == 0 => {
+            // MOVI byte-replicate (op=0) or bit-to-byte (op=1).
             if !op {
                 let mut v = 0u64;
                 for k in 0..8 {
@@ -74,6 +75,15 @@ fn expand(op: bool, cmode: u8, imm8: u8) -> u64 {
                     }
                 }
                 v
+            }
+        }
+        // cmode 1111: FMOV-vector. op=0 -> single (replicated), op=1 -> double.
+        _ => {
+            if !op {
+                let s = u64::from(crate::fp::expand_imm_s(imm8));
+                s | (s << 32)
+            } else {
+                crate::fp::expand_imm_d(imm8)
             }
         }
     }

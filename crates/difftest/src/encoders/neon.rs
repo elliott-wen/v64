@@ -576,10 +576,13 @@ fn two_reg_misc_fp(rng: &mut Rng) -> FpEncoded {
 }
 
 fn mod_imm(rng: &mut Rng) -> FpEncoded {
-    let q = rng.below(2);
+    let mut q = rng.below(2);
     let op = rng.below(2);
-    // cmode 0..14 (exclude 1111 = FMOV-vector, not implemented).
-    let cmode = rng.below(15);
+    // cmode 0..15; cmode 1111 is FMOV-vector (op=1 needs Q=1; op=1 Q=0 = FP16).
+    let cmode = rng.below(16);
+    if cmode == 0b1111 && op == 1 {
+        q = 1;
+    }
     let imm8 = rng.bits(8);
     let word = (q << 30)
         | (op << 29)
