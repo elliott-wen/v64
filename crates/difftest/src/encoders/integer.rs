@@ -169,8 +169,13 @@ fn data_proc_1src(rng: &mut Rng) -> u32 {
 }
 
 fn data_proc_2src(rng: &mut Rng) -> u32 {
-    let sf = bit(rng);
-    let opcode = [2u32, 3, 8, 9, 10, 11][rng.below(6) as usize];
+    // Plain 2-src ops (random sf), and CRC32/CRC32C (sf tied to the size).
+    let (sf, opcode) = if rng.below(2) == 0 {
+        (bit(rng), [2u32, 3, 8, 9, 10, 11][rng.below(6) as usize])
+    } else {
+        let op = 0x10 + rng.below(8); // CRC32{B,H,W,X}, CRC32C{B,H,W,X}
+        ((op & 3 == 3) as u32, op)
+    };
     (sf << 31)
         | (0b11010110 << 21)
         | (reg(rng) << 16)
