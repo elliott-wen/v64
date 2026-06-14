@@ -7,8 +7,8 @@
 use crate::bits::field;
 use crate::insn::Insn;
 use crate::{
-    neon_across, neon_copy, neon_ext, neon_indexed, neon_mod_imm, neon_shift_imm, neon_tbl,
-    neon_three_diff, neon_three_same, neon_three_same_fp, neon_two_reg_misc, neon_zip_trn,
+    neon_aes, neon_across, neon_copy, neon_ext, neon_indexed, neon_mod_imm, neon_shift_imm,
+    neon_tbl, neon_three_diff, neon_three_same, neon_three_same_fp, neon_two_reg_misc, neon_zip_trn,
 };
 
 fn matches(word: u32, mask: u32, value: u32) -> bool {
@@ -34,6 +34,9 @@ pub(crate) fn decode(word: u32) -> Insn {
     }
     if matches(word, 0xbf20_8c00, 0x0e00_0000) {
         return neon_tbl::decode(word);
+    }
+    if matches(word, 0xff3e_0c00, 0x4e28_0800) {
+        return neon_aes::decode(word);
     }
     if matches(word, 0xbf20_8400, 0x2e00_0000) {
         return neon_ext::decode(word);

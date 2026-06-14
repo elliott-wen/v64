@@ -63,6 +63,7 @@ mod ldst_uimm;
 mod ldst_unscaled;
 
 // Advanced SIMD classes.
+mod neon_aes;
 mod neon_across;
 mod neon_copy;
 mod neon_ext;

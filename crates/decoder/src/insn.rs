@@ -270,6 +270,9 @@ pub enum Insn {
     /// Advanced SIMD table lookup TBL/TBX over `len+1` consecutive registers.
     SimdTableLookup { q: bool, is_tbx: bool, len: u8, rm: u8, rn: u8, rd: u8 },
 
+    /// Crypto AES round: AESE(0x4)/AESD(0x5)/AESMC(0x6)/AESIMC(0x7).
+    CryptoAes { opcode: u8, rn: u8, rd: u8 },
+
     /// Advanced SIMD load/store multiple structures (LD1-4/ST1-4). `rpt`
     /// register iterations of `selem` interleaved structure elements. `postidx`
     /// with `rm==31` increments by the transfer size, else by X[rm].

@@ -44,6 +44,7 @@ mod move_wide;
 mod pc_rel;
 mod simd;
 mod simd_across;
+mod simd_aes;
 mod simd_copy;
 mod simd_dup;
 mod simd_ext;

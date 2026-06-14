@@ -29,6 +29,7 @@ pub(super) fn classes() -> Vec<FpClass> {
         FpClass { name: "neon_zip_trn", encode: zip_trn },
         FpClass { name: "neon_ext", encode: ext },
         FpClass { name: "neon_tbl", encode: tbl },
+        FpClass { name: "neon_aes", encode: aes },
         FpClass { name: "neon_shift_imm", encode: shift_imm },
         FpClass { name: "neon_across", encode: across },
         FpClass { name: "neon_scalar_three_same", encode: scalar_three_same },
@@ -356,6 +357,12 @@ fn zip_trn(rng: &mut Rng) -> FpEncoded {
         | (1 << 11)
         | (rng.bits(5) << 5)
         | rng.bits(5);
+    enc(word, rng)
+}
+
+fn aes(rng: &mut Rng) -> FpEncoded {
+    let opcode = 0x4 + rng.below(4); // AESE/AESD/AESMC/AESIMC
+    let word = 0x4e28_0800 | (opcode << 12) | (rng.bits(5) << 5) | rng.bits(5);
     enc(word, rng)
 }
 
