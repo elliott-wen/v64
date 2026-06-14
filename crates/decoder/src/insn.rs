@@ -255,6 +255,28 @@ pub enum Insn {
     /// `opcode` is bits[15:12]; `index` is the decoded element index into Vm.
     SimdIndexed { q: bool, u: bool, size: u8, opcode: u8, index: u8, rm: u8, rn: u8, rd: u8 },
 
+    /// Advanced SIMD scalar three-same: a single-element op (the vector
+    /// arithmetic on lane 0, with the rest of the register zeroed).
+    SimdScalarThreeSame { u: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD scalar two-register misc (integer + FP sub-block).
+    SimdScalarTwoRegMisc { u: bool, size: u8, opcode: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD scalar pairwise reduction (ADDP/FADDP/FMAXP/...).
+    SimdScalarPairwise { u: bool, size: u8, opcode: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD scalar three-different (SQDMULL/SQDMLAL/SQDMLSL).
+    SimdScalarThreeDiff { size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD scalar copy: DUP element to a scalar.
+    SimdScalarCopy { imm5: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD scalar shift by immediate.
+    SimdScalarShiftImm { u: bool, immh: u8, immb: u8, opcode: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD scalar x indexed element.
+    SimdScalarIndexed { u: bool, size: u8, opcode: u8, index: u8, rm: u8, rn: u8, rd: u8 },
+
     /// Advanced SIMD permute: ZIP1/2, UZP1/2, TRN1/2. `opcode` is bits[14:12].
     SimdZipTrn { q: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
 

@@ -49,6 +49,7 @@ mod simd_ext;
 mod simd_indexed;
 mod simd_mod_imm;
 mod simd_permute;
+mod simd_scalar;
 mod simd_shift_fp;
 mod simd_shift_imm;
 mod simd_shift_long;

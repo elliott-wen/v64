@@ -132,6 +132,13 @@ fp_class_tests!(
     neon_ext,
     neon_shift_imm,
     neon_across,
+    neon_scalar_three_same,
+    neon_scalar_two_reg_misc,
+    neon_scalar_pairwise,
+    neon_scalar_three_diff,
+    neon_scalar_copy,
+    neon_scalar_indexed,
+    neon_scalar_shift,
 );
 
 class_tests!(

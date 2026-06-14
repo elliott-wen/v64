@@ -67,6 +67,7 @@ mod neon_copy;
 mod neon_ext;
 mod neon_indexed;
 mod neon_mod_imm;
+mod neon_scalar;
 mod neon_shift_imm;
 mod neon_three_diff;
 mod neon_three_same;
@@ -101,8 +102,14 @@ pub fn decode(word: u32) -> Insn {
         0b1010 | 0b1011 => branch::decode(word),
         // Data processing -- register
         0b0101 | 0b1101 => dp_reg::decode(word),
-        // Data processing -- scalar floating-point
-        0b1111 => fp::decode(word),
+        // Scalar advanced SIMD (bit30=1) vs scalar floating-point (bit30=0).
+        0b1111 => {
+            if bits::field(word, 30, 1) == 1 {
+                neon_scalar::decode(word)
+            } else {
+                fp::decode(word)
+            }
+        }
         // Advanced SIMD (vector)
         0b0111 => neon::decode(word),
         _ => Insn::Unsupported { word },

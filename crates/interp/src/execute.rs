@@ -14,7 +14,7 @@ use crate::{
     data_proc_2src, data_proc_3src, exception, extract, fp, ldst, ldst_atomic, ldst_cas, ldst_excl,
     ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, simd_across, simd_copy, simd_dup,
     simd_ext, simd_indexed,
-    simd_mod_imm, simd_permute, simd_shift_imm, simd_three_diff, simd_three_same,
+    simd_mod_imm, simd_permute, simd_scalar, simd_shift_imm, simd_three_diff, simd_three_same,
     simd_three_same_fp, simd_two_reg_misc, simd_two_reg_misc_fp, system, test_branch,
 };
 
@@ -97,6 +97,25 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
         }
         Insn::SimdIndexed { q, u, size, opcode, index, rm, rn, rd } => {
             simd_indexed::exec(cpu, q, u, size, opcode, index, rm, rn, rd)
+        }
+        Insn::SimdScalarThreeSame { u, size, opcode, rm, rn, rd } => {
+            simd_scalar::three_same(cpu, u, size, opcode, rm, rn, rd)
+        }
+        Insn::SimdScalarTwoRegMisc { u, size, opcode, rn, rd } => {
+            simd_scalar::two_reg_misc(cpu, u, size, opcode, rn, rd)
+        }
+        Insn::SimdScalarPairwise { u, size, opcode, rn, rd } => {
+            simd_scalar::pairwise(cpu, u, size, opcode, rn, rd)
+        }
+        Insn::SimdScalarThreeDiff { size, opcode, rm, rn, rd } => {
+            simd_scalar::three_diff(cpu, size, opcode, rm, rn, rd)
+        }
+        Insn::SimdScalarCopy { imm5, rn, rd } => simd_scalar::copy(cpu, imm5, rn, rd),
+        Insn::SimdScalarIndexed { u, size, opcode, index, rm, rn, rd } => {
+            simd_scalar::indexed(cpu, u, size, opcode, index, rm, rn, rd)
+        }
+        Insn::SimdScalarShiftImm { u, immh, immb, opcode, rn, rd } => {
+            simd_scalar::shift_imm(cpu, u, immh, immb, opcode, rn, rd)
         }
         Insn::SimdAcrossLanes { q, u, size, opcode, rn, rd } => {
             simd_across::exec(cpu, q, u, size, opcode, rn, rd)
