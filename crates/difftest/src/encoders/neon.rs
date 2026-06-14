@@ -696,8 +696,13 @@ fn indexed(rng: &mut Rng) -> FpEncoded {
         (0, 0b0101, true),  // FMLS
         (0, 0b1001, true),  // FMUL
         (1, 0b1001, true),  // FMULX
+        (1, 0b1101, false), // SQRDMLAH
+        (1, 0b1111, false), // SQRDMLSH
+        (0, 0b1110, false), // SDOT
+        (1, 0b1110, false), // UDOT
     ];
     let (u, opcode, is_fp) = ops[rng.below(ops.len() as u32) as usize];
+    let is_dot = opcode == 0b1110;
     let q = rng.below(2);
 
     // Pick size, then derive index bits (h, l, m) and the Rm register.
@@ -712,7 +717,7 @@ fn indexed(rng: &mut Rng) -> FpEncoded {
             let rm5 = rng.bits(5);
             (3u32, idx, 0, rm5 >> 4, rm5 & 0xf, 1)
         }
-    } else if rng.below(2) == 0 {
+    } else if !is_dot && rng.below(2) == 0 {
         // MO_16: index = h:l:m (0..7), Rm in 0..15.
         let idx = rng.below(8);
         (1u32, idx >> 2, (idx >> 1) & 1, idx & 1, rng.bits(4), q)

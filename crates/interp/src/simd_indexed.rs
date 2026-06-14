@@ -24,6 +24,8 @@ pub(crate) fn exec(
     let result = match key {
         0x01 | 0x05 | 0x09 | 0x19 => fp_indexed(key, size, q, index, vn, vm, vd),
         0x08 | 0x10 | 0x14 | 0x0c | 0x0d => int_normal(key, size, q, index, vn, vm, vd),
+        0x1d | 0x1f => rdmlah_indexed(key, size, q, index, vn, vm, vd),
+        0x0e | 0x1e => dot_indexed(key, q, index, vn, vm, vd),
         _ => int_long(key, u, size, q, index, vn, vm, vd),
     };
     cpu.v[rd as usize] = result;
@@ -116,6 +118,61 @@ fn int_long(key: u8, u: bool, size: u8, q: bool, index: u8, vn: u128, vm: u128, 
 
 fn sx_w(v: u64, bits: u32) -> i64 {
     sx(v, bits)
+}
+
+/// SQRDMLAH/SQRDMLSH by indexed element.
+fn rdmlah_indexed(key: u8, size: u8, q: bool, index: u8, vn: u128, vm: u128, vd: u128) -> u128 {
+    let esize = 8u32 << size;
+    let m = elem(vm, esize, index);
+    let n = (if q { 128 } else { 64 }) / esize;
+    let sub = key == 0x1f;
+    let mut out = 0u128;
+    for i in 0..n {
+        let nn = ((vn >> (i * esize)) & u128::from(width_mask(esize))) as u64;
+        let a = ((vd >> (i * esize)) & u128::from(width_mask(esize))) as u64;
+        out |= u128::from(sqrdmlah(sub, nn, m, a, esize)) << (i * esize);
+    }
+    out
+}
+
+fn sqrdmlah(sub: bool, n: u64, m: u64, a: u64, ebits: u32) -> u64 {
+    let prod = i128::from(sx(n, ebits)) * i128::from(sx(m, ebits));
+    let acc = i128::from(sx(a, ebits)) << (ebits - 1);
+    let round = 1i128 << (ebits - 2);
+    let mut ret = if sub { acc - prod + round } else { acc + prod + round };
+    ret >>= ebits - 1;
+    let (lo, hi) = (-(1i128 << (ebits - 1)), (1i128 << (ebits - 1)) - 1);
+    (ret.clamp(lo, hi) as u64) & width_mask(ebits)
+}
+
+/// SDOT/UDOT by indexed element: the 4 bytes of the indexed 32-bit element of Vm
+/// dot each 4-byte group of Vn into Vd's 32-bit lanes.
+fn dot_indexed(key: u8, q: bool, index: u8, vn: u128, vm: u128, vd: u128) -> u128 {
+    let unsigned = key == 0x1e;
+    let nbytes = vn.to_le_bytes();
+    let mbytes = vm.to_le_bytes();
+    let lanes = if q { 4 } else { 2 };
+    let mut out = vd;
+    for i in 0..lanes {
+        let mut acc = ((vd >> (i * 32)) & u128::from(u32::MAX)) as u32;
+        for k in 0..4 {
+            let nb = nbytes[i * 4 + k];
+            let mb = mbytes[usize::from(index) * 4 + k];
+            let p = if unsigned {
+                u32::from(nb).wrapping_mul(u32::from(mb))
+            } else {
+                (i32::from(nb as i8) * i32::from(mb as i8)) as u32
+            };
+            acc = acc.wrapping_add(p);
+        }
+        out &= !(u128::from(u32::MAX) << (i * 32));
+        out |= u128::from(acc) << (i * 32);
+    }
+    if q {
+        out
+    } else {
+        out & u128::from(u64::MAX)
+    }
 }
 
 fn fp_indexed(key: u8, size: u8, q: bool, index: u8, vn: u128, vm: u128, vd: u128) -> u128 {

@@ -20,10 +20,13 @@ pub(crate) fn decode(word: u32) -> Insn {
 
     let key = 16 * u + u32::from(opcode); // 16*U + opcode
     let is_fp = matches!(key, 0x01 | 0x05 | 0x09 | 0x19);
+    let is_dot = matches!(key, 0x0e | 0x1e); // SDOT / UDOT
 
     // Element size validity.
     let size_ok = if is_fp {
         size == 2 || size == 3 // single / double (FP16 skipped)
+    } else if is_dot {
+        size == 2
     } else {
         size == 1 || size == 2 // H / S
     };
@@ -33,6 +36,8 @@ pub(crate) fn decode(word: u32) -> Insn {
         | 0x02 | 0x12 | 0x06 | 0x16 | 0x0a | 0x1a // MLAL/MLSL/MULL (S/U)
         | 0x03 | 0x07 | 0x0b          // SQDMLAL / SQDMLSL / SQDMULL
         | 0x0c | 0x0d                 // SQDMULH / SQRDMULH
+        | 0x0e | 0x1e                 // SDOT / UDOT
+        | 0x1d | 0x1f                 // SQRDMLAH / SQRDMLSH
         | 0x01 | 0x05 | 0x09 | 0x19   // FMLA / FMLS / FMUL / FMULX
     );
     if !allocated || !size_ok {
