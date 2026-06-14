@@ -17,6 +17,7 @@ pub(super) fn classes() -> Vec<FpClass> {
     vec![
         FpClass { name: "neon_three_same", encode: three_same },
         FpClass { name: "neon_three_diff", encode: three_diff },
+        FpClass { name: "neon_indexed", encode: indexed },
         FpClass { name: "neon_three_same_fp", encode: three_same_fp },
         FpClass { name: "neon_two_reg_misc", encode: two_reg_misc },
         FpClass { name: "neon_two_reg_misc_fp", encode: two_reg_misc_fp },
@@ -379,6 +380,68 @@ fn dup_general(rng: &mut Rng) -> FpEncoded {
         gpr_seeds: (0..31).map(|r| (r as u8, rng.next_u64())).collect(),
         fpcr: 0,
     }
+}
+
+fn indexed(rng: &mut Rng) -> FpEncoded {
+    // (u, opcode, is_fp).
+    let ops: &[(u32, u32, bool)] = &[
+        (0, 0b1000, false), // MUL
+        (1, 0b0000, false), // MLA
+        (1, 0b0100, false), // MLS
+        (0, 0b0010, false), // SMLAL
+        (1, 0b0010, false), // UMLAL
+        (0, 0b0110, false), // SMLSL
+        (1, 0b0110, false), // UMLSL
+        (0, 0b1010, false), // SMULL
+        (1, 0b1010, false), // UMULL
+        (0, 0b0011, false), // SQDMLAL
+        (0, 0b0111, false), // SQDMLSL
+        (0, 0b1011, false), // SQDMULL
+        (0, 0b1100, false), // SQDMULH
+        (0, 0b1101, false), // SQRDMULH
+        (0, 0b0001, true),  // FMLA
+        (0, 0b0101, true),  // FMLS
+        (0, 0b1001, true),  // FMUL
+        (1, 0b1001, true),  // FMULX
+    ];
+    let (u, opcode, is_fp) = ops[rng.below(ops.len() as u32) as usize];
+    let q = rng.below(2);
+
+    // Pick size, then derive index bits (h, l, m) and the Rm register.
+    let (size, h, l, m, rm4, q) = if is_fp {
+        // single (size 2) or double (size 3, needs L=0 and Q=1).
+        if rng.below(2) == 0 {
+            let idx = rng.below(4); // h:l
+            let rm5 = rng.bits(5);
+            (2u32, idx >> 1, idx & 1, rm5 >> 4, rm5 & 0xf, q)
+        } else {
+            let idx = rng.below(2); // h
+            let rm5 = rng.bits(5);
+            (3u32, idx, 0, rm5 >> 4, rm5 & 0xf, 1)
+        }
+    } else if rng.below(2) == 0 {
+        // MO_16: index = h:l:m (0..7), Rm in 0..15.
+        let idx = rng.below(8);
+        (1u32, idx >> 2, (idx >> 1) & 1, idx & 1, rng.bits(4), q)
+    } else {
+        // MO_32: index = h:l (0..3), Rm 5-bit via m.
+        let idx = rng.below(4);
+        let rm5 = rng.bits(5);
+        (2u32, idx >> 1, idx & 1, rm5 >> 4, rm5 & 0xf, q)
+    };
+
+    let word = (q << 30)
+        | (u << 29)
+        | (0b01111 << 24)
+        | (size << 22)
+        | (l << 21)
+        | (m << 20)
+        | (rm4 << 16)
+        | (opcode << 12)
+        | (h << 11)
+        | (rng.bits(5) << 5)
+        | rng.bits(5);
+    FpEncoded { word, init_v: random_v(rng), gpr_seeds: vec![], fpcr: if is_fp { FPCR_DN } else { 0 } }
 }
 
 fn three_diff(rng: &mut Rng) -> FpEncoded {

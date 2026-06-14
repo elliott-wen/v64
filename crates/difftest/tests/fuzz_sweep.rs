@@ -119,6 +119,7 @@ fp_class_tests!(
     fp_cvt,
     neon_three_same,
     neon_three_diff,
+    neon_indexed,
     neon_three_same_fp,
     neon_two_reg_misc,
     neon_two_reg_misc_fp,

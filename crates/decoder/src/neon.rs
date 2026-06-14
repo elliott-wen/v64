@@ -7,7 +7,7 @@
 use crate::bits::field;
 use crate::insn::Insn;
 use crate::{
-    neon_across, neon_copy, neon_ext, neon_mod_imm, neon_shift_imm, neon_three_diff,
+    neon_across, neon_copy, neon_ext, neon_indexed, neon_mod_imm, neon_shift_imm, neon_three_diff,
     neon_three_same, neon_three_same_fp, neon_two_reg_misc, neon_zip_trn,
 };
 
@@ -19,6 +19,10 @@ pub(crate) fn decode(word: u32) -> Insn {
     // bits[28:24]=01111 covers both modified-immediate (immh==0) and
     // shift-by-immediate (immh!=0).
     if field(word, 24, 5) == 0b01111 {
+        // Indexed-element ops share this block but have bit10 = 0.
+        if field(word, 10, 1) == 0 {
+            return neon_indexed::decode(word);
+        }
         return if field(word, 19, 4) == 0 {
             neon_mod_imm::decode(word)
         } else {

@@ -65,6 +65,7 @@ mod ldst_unscaled;
 mod neon_across;
 mod neon_copy;
 mod neon_ext;
+mod neon_indexed;
 mod neon_mod_imm;
 mod neon_shift_imm;
 mod neon_three_diff;

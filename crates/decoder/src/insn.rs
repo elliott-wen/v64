@@ -251,6 +251,10 @@ pub enum Insn {
     /// ADDHN/SQDMULL/PMULL/... `opcode` is bits[15:12]; Q selects the upper half.
     SimdThreeDiff { q: bool, u: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
 
+    /// Advanced SIMD vector x indexed element (MUL/MLA/MLAL/SQDMULL/FMLA/...).
+    /// `opcode` is bits[15:12]; `index` is the decoded element index into Vm.
+    SimdIndexed { q: bool, u: bool, size: u8, opcode: u8, index: u8, rm: u8, rn: u8, rd: u8 },
+
     /// Advanced SIMD permute: ZIP1/2, UZP1/2, TRN1/2. `opcode` is bits[14:12].
     SimdZipTrn { q: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
 
