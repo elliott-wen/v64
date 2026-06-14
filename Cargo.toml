@@ -5,6 +5,7 @@ members = [
     "crates/decoder",
     "crates/interp",
     "crates/difftest",
+    "crates/jit",
 ]
 
 [workspace.package]

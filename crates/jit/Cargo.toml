@@ -1,0 +1,12 @@
+[package]
+name = "aarch64-jit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+aarch64-cpu-state.workspace = true
+aarch64-decoder.workspace = true
+aarch64-interp.workspace = true
+wasm-encoder = "0.252.0"
+wasmtime = "45.0.1"
