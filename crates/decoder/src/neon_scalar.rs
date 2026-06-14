@@ -11,6 +11,13 @@ fn m(word: u32, mask: u32, val: u32) -> bool {
 }
 
 pub(crate) fn decode(word: u32) -> Insn {
+    // Crypto SHA shares the op0=1111/bit30=1 region but has bit29=0.
+    if m(word, 0xff20_8c00, 0x5e00_0000) {
+        return crate::neon_sha::three_reg(word);
+    }
+    if m(word, 0xff3e_0c00, 0x5e28_0800) {
+        return crate::neon_sha::two_reg(word);
+    }
     if m(word, 0xdf20_0c00, 0x5e20_0000) {
         return three_diff(word);
     }

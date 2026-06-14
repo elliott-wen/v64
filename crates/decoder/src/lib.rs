@@ -70,6 +70,7 @@ mod neon_ext;
 mod neon_indexed;
 mod neon_mod_imm;
 mod neon_scalar;
+mod neon_sha;
 mod neon_shift_imm;
 mod neon_tbl;
 mod neon_three_diff;

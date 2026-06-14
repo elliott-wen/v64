@@ -138,6 +138,8 @@ fp_class_tests!(
     neon_ext,
     neon_tbl,
     neon_aes,
+    neon_sha3,
+    neon_sha2,
     neon_shift_imm,
     neon_across,
     neon_scalar_three_same,
