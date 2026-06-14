@@ -56,17 +56,45 @@ fn across(rng: &mut Rng) -> FpEncoded {
 
 fn shift_imm(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
-    // SSHR/USHR (00000), SSRA/USRA (00010), SHL (01010, U=0 only).
-    let (opcode, u) = match rng.below(5) {
-        0 => (0b00000u32, 0),
-        1 => (0b00000, 1),
-        2 => (0b00010, 0),
-        3 => (0b00010, 1),
-        _ => (0b01010, 0), // SHL
+    // (opcode, u). u==2 means "either" (random U with both allocated).
+    let table: &[(u32, u32)] = &[
+        (0b00000, 2), // SSHR/USHR
+        (0b00010, 2), // SSRA/USRA
+        (0b00100, 2), // SRSHR/URSHR
+        (0b00110, 2), // SRSRA/URSRA
+        (0b01000, 1), // SRI (U=1)
+        (0b01010, 2), // SHL / SLI
+        (0b01100, 1), // SQSHLU (U=1)
+        (0b01110, 2), // SQSHL / UQSHL
+        (0b10000, 2), // SHRN / SQSHRUN
+        (0b10001, 2), // RSHRN / SQRSHRUN
+        (0b10010, 2), // SQSHRN / UQSHRN
+        (0b10011, 2), // SQRSHRN / UQRSHRN
+        (0b10100, 2), // SSHLL / USHLL
+        (0b11100, 2), // SCVTF / UCVTF
+        (0b11111, 2), // FCVTZS / FCVTZU
+    ];
+    let (opcode, ufix) = table[rng.below(table.len() as u32) as usize];
+    let u = if ufix == 2 { rng.below(2) } else { ufix };
+
+    // Pick the element size and immh:immb consistent with the op's shape.
+    let (immh, immb) = match opcode {
+        // Narrowing / widening: element size 0..2 (immh top bit not 0b1000).
+        0b10000..=0b10100 => {
+            let size = rng.below(3);
+            ((1 << size) | rng.below(1 << size), rng.below(8))
+        }
+        // Fixed-point convert: only 32-bit (immh=01xx) or 64-bit (immh=1xxx, Q=1).
+        0b11100 | 0b11111 => {
+            let size = if q == 1 { 2 + rng.below(2) } else { 2 };
+            ((1 << size) | rng.below(1 << size), rng.below(8))
+        }
+        // Same-width: any element size (64-bit needs Q=1).
+        _ => {
+            let size = if q == 1 { rng.below(4) } else { rng.below(3) };
+            ((1 << size) | rng.below(1 << size), rng.below(8))
+        }
     };
-    let size = if q == 1 { rng.below(4) } else { rng.below(3) };
-    let immh = (1 << size) | rng.below(1 << size); // highest set bit picks the size
-    let immb = rng.below(8);
     let word = (q << 30)
         | (u << 29)
         | (0b011110 << 23)
@@ -76,7 +104,11 @@ fn shift_imm(rng: &mut Rng) -> FpEncoded {
         | (1 << 10)
         | (rng.bits(5) << 5)
         | rng.bits(5);
-    enc(word, rng)
+    let mut e = enc(word, rng);
+    if matches!(opcode, 0b11100 | 0b11111) {
+        e.fpcr = FPCR_DN;
+    }
+    e
 }
 
 fn zip_trn(rng: &mut Rng) -> FpEncoded {
