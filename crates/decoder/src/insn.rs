@@ -264,8 +264,13 @@ pub enum Insn {
     /// Advanced SIMD across-lanes reduction (ADDV/SMAXV/UMAXV/SMINV/UMINV).
     SimdAcrossLanes { q: bool, u: bool, size: u8, opcode: u8, rn: u8, rd: u8 },
 
-    /// Advanced SIMD two-register misc (NEG/ABS/NOT/CNT/CLZ/CLS/REV).
+    /// Advanced SIMD two-register misc (NEG/ABS/NOT/CNT/CLZ/CLS/REV, plus
+    /// SUQADD/SQABS/CM*-zero/XTN/SHLL/SADDLP).
     SimdTwoRegMisc { q: bool, u: bool, size: u8, opcode: u8, rn: u8, rd: u8 },
+
+    /// Advanced SIMD two-register misc, floating-point sub-block. `fpop` is the
+    /// 7-bit remapped opcode; `sz` selects single vs double lanes.
+    SimdTwoRegMiscFp { q: bool, sz: bool, fpop: u8, rn: u8, rd: u8 },
 
     /// Advanced SIMD modified immediate (MOVI/MVNI/ORR/BIC). `op`/`cmode` select
     /// how the expanded `imm8` combines with Vd.

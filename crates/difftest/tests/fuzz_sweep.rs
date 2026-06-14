@@ -121,6 +121,7 @@ fp_class_tests!(
     neon_three_diff,
     neon_three_same_fp,
     neon_two_reg_misc,
+    neon_two_reg_misc_fp,
     neon_mod_imm,
     neon_dup,
     neon_dup_element,

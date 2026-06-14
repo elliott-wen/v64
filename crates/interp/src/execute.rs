@@ -15,7 +15,7 @@ use crate::{
     ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, simd_across, simd_copy, simd_dup,
     simd_ext,
     simd_mod_imm, simd_permute, simd_shift_imm, simd_three_diff, simd_three_same,
-    simd_three_same_fp, simd_two_reg_misc, system, test_branch,
+    simd_three_same_fp, simd_two_reg_misc, simd_two_reg_misc_fp, system, test_branch,
 };
 
 pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64) -> Option<u64> {
@@ -100,6 +100,9 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
         }
         Insn::SimdTwoRegMisc { q, u, size, opcode, rn, rd } => {
             simd_two_reg_misc::exec(cpu, q, u, size, opcode, rn, rd)
+        }
+        Insn::SimdTwoRegMiscFp { q, sz, fpop, rn, rd } => {
+            simd_two_reg_misc_fp::exec(cpu, q, sz, fpop, rn, rd)
         }
         Insn::SimdModImm { q, op, cmode, imm8, rd } => {
             simd_mod_imm::exec(cpu, q, op, cmode, imm8, rd)

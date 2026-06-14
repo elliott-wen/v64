@@ -52,7 +52,10 @@ mod simd_shift_imm;
 mod simd_three_diff;
 mod simd_three_same;
 mod simd_three_same_fp;
+mod simd_two_reg_long;
 mod simd_two_reg_misc;
+mod simd_two_reg_misc_fp;
+mod simd_two_reg_narrow;
 mod system;
 mod test_branch;
 
