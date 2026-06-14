@@ -78,6 +78,12 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64)
         Insn::StoreExclusive { size, rs, rt, rn } => ldst_excl::store(cpu, mem, size, rs, rt, rn),
         Insn::FpDataProc1 { ftype, opcode, rn, rd } => fp::dp1(cpu, ftype, opcode, rn, rd),
         Insn::FpDataProc2 { ftype, opcode, rm, rn, rd } => fp::dp2(cpu, ftype, opcode, rm, rn, rd),
+        Insn::FpDataProc3 { ftype, o1, o0, rm, ra, rn, rd } => {
+            fp::dp3(cpu, ftype, o1, o0, rm, ra, rn, rd)
+        }
+        Insn::FpCondCompare { ftype, rm, rn, cond, nzcv, signaling } => {
+            fp::ccmp(cpu, ftype, rm, rn, cond, nzcv, signaling)
+        }
         Insn::FpCompare { ftype, rm, rn, cmp_zero, signaling: _ } => {
             fp::compare(cpu, ftype, rm, rn, cmp_zero)
         }

@@ -211,6 +211,13 @@ pub enum Insn {
     /// `opcode` is bits[15:12].
     FpDataProc2 { ftype: u8, opcode: u8, rm: u8, rn: u8, rd: u8 },
 
+    /// Scalar FP data-processing, 3 source (FMADD/FMSUB/FNMADD/FNMSUB). `o1`/`o0`
+    /// select the variant.
+    FpDataProc3 { ftype: u8, o1: bool, o0: bool, rm: u8, ra: u8, rn: u8, rd: u8 },
+
+    /// Scalar FP conditional compare (FCCMP/FCCMPE).
+    FpCondCompare { ftype: u8, rm: u8, rn: u8, cond: u8, nzcv: u8, signaling: bool },
+
     /// Scalar FP compare (FCMP/FCMPE), optionally against zero / signaling.
     FpCompare { ftype: u8, rm: u8, rn: u8, cmp_zero: bool, signaling: bool },
 

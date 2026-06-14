@@ -220,6 +220,64 @@ pub(crate) fn csel(
     None
 }
 
+/// FMADD/FMSUB/FNMADD/FNMSUB: fused multiply-add with a single rounding.
+/// `o1`/`o0` negate the addend / the product respectively, matching
+/// `FPMulAdd(o1?-Ra:Ra, o1^o0?-Rn:Rn, Rm)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dp3(
+    cpu: &mut CpuState,
+    ftype: u8,
+    o1: bool,
+    o0: bool,
+    rm: u8,
+    ra: u8,
+    rn: u8,
+    rd: u8,
+) -> Option<u64> {
+    if single(ftype) {
+        let (n, m, a) = (read_s(cpu, rn), read_s(cpu, rm), read_s(cpu, ra));
+        let n = if o1 { -n } else { n }; // FNMADD/FNMSUB negate Rn
+        let a = if o1 { -a } else { a }; // FNMADD/FNMSUB negate Ra
+        let n = if o0 { -n } else { n }; // FMSUB/FNMADD negate the product
+        write_s(cpu, rd, canon_s(n.mul_add(m, a)));
+    } else {
+        let (n, m, a) = (read_d(cpu, rn), read_d(cpu, rm), read_d(cpu, ra));
+        let n = if o1 { -n } else { n };
+        let a = if o1 { -a } else { a };
+        let n = if o0 { -n } else { n };
+        write_d(cpu, rd, canon_d(n.mul_add(m, a)));
+    }
+    None
+}
+
+/// FCCMP/FCCMPE: compare if `cond` holds, else set NZCV to the immediate.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ccmp(
+    cpu: &mut CpuState,
+    ftype: u8,
+    rm: u8,
+    rn: u8,
+    cond: u8,
+    nzcv: u8,
+    _signaling: bool,
+) -> Option<u64> {
+    cpu.flags = if eval_cond(cond, cpu.flags) {
+        if single(ftype) {
+            compare_flags(read_s(cpu, rn).partial_cmp(&read_s(cpu, rm)))
+        } else {
+            compare_flags(read_d(cpu, rn).partial_cmp(&read_d(cpu, rm)))
+        }
+    } else {
+        Flags {
+            n: nzcv & 0b1000 != 0,
+            z: nzcv & 0b0100 != 0,
+            c: nzcv & 0b0010 != 0,
+            v: nzcv & 0b0001 != 0,
+        }
+    };
+    None
+}
+
 pub(crate) fn imm(cpu: &mut CpuState, ftype: u8, imm8: u8, rd: u8) -> Option<u64> {
     if single(ftype) {
         write_s(cpu, rd, expand_imm_s(imm8));

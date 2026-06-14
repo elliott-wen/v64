@@ -6,9 +6,13 @@
 
 use crate::bits::field;
 use crate::insn::Insn;
-use crate::{fp_compare, fp_csel, fp_cvt, fp_dp1, fp_dp2, fp_imm};
+use crate::{fp_ccmp, fp_compare, fp_csel, fp_cvt, fp_dp1, fp_dp2, fp_dp3, fp_imm};
 
 pub(crate) fn decode(word: u32) -> Insn {
+    // 3-source (FMADD/FMSUB/FNMADD/FNMSUB) shares op0 but has bits[28:24]=11111.
+    if field(word, 24, 5) == 0b11111 {
+        return fp_dp3::decode(word);
+    }
     if field(word, 24, 5) != 0b11110 || field(word, 21, 1) != 1 {
         return Insn::Unsupported { word };
     }
@@ -28,8 +32,7 @@ pub(crate) fn decode(word: u32) -> Insn {
         }
         0b10 => fp_dp2::decode(word), // 2-source
         0b11 => fp_csel::decode(word),
-        // 0b01 = FP conditional compare (FCCMP) — not implemented yet.
-        _ => Insn::Unsupported { word },
+        _ => fp_ccmp::decode(word), // 0b01 = FP conditional compare
     }
 }
 

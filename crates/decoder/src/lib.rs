@@ -76,11 +76,13 @@ mod neon_two_reg_misc;
 mod neon_zip_trn;
 
 // Scalar floating-point classes.
+mod fp_ccmp;
 mod fp_compare;
 mod fp_csel;
 mod fp_cvt;
 mod fp_dp1;
 mod fp_dp2;
+mod fp_dp3;
 mod fp_imm;
 
 pub use bitmask::decode_bit_masks;

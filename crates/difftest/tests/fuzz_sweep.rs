@@ -117,6 +117,8 @@ fp_class_tests!(
     fp_csel,
     fp_imm,
     fp_cvt,
+    fp_dp3,
+    fp_ccmp,
     neon_three_same,
     neon_three_diff,
     neon_indexed,

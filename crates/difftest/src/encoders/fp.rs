@@ -23,7 +23,40 @@ pub(super) fn classes() -> Vec<FpClass> {
         FpClass { name: "fp_csel", encode: fp_csel },
         FpClass { name: "fp_imm", encode: fp_imm },
         FpClass { name: "fp_cvt", encode: fp_cvt },
+        FpClass { name: "fp_dp3", encode: fp_dp3 },
+        FpClass { name: "fp_ccmp", encode: fp_ccmp },
     ]
+}
+
+fn fp_dp3(rng: &mut Rng) -> FpEncoded {
+    let ftype = rng.below(2);
+    let o1 = rng.below(2);
+    let o0 = rng.below(2);
+    let word = (0b0011111 << 24)
+        | (ftype << 22)
+        | (o1 << 21)
+        | (reg(rng) << 16)
+        | (o0 << 15)
+        | (reg(rng) << 10)
+        | (reg(rng) << 5)
+        | reg(rng);
+    enc(word, rng)
+}
+
+fn fp_ccmp(rng: &mut Rng) -> FpEncoded {
+    let ftype = rng.below(2);
+    let op = rng.below(2); // FCCMP / FCCMPE
+    let word = FP_HDR
+        | (ftype << 22)
+        | (1 << 21)
+        | (reg(rng) << 16)
+        | (rng.bits(4) << 12)
+        | (0b01 << 10)
+        | (reg(rng) << 5)
+        | (op << 4)
+        | rng.bits(4);
+    // Seed NZCV via random flags init? The harness sets flags; just fuzz.
+    enc(word, rng)
 }
 
 fn random_v(rng: &mut Rng) -> [u128; 32] {
