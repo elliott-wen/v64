@@ -16,8 +16,8 @@ mod machine;
 mod uart;
 
 pub use board::{
-    Board, DEFAULT_RAM_SIZE, DTB_LOAD, GICC_BASE, GICD_BASE, KERNEL_LOAD, RAM_BASE, UART_BASE,
-    UART_IRQ,
+    parse_image_header, Board, BootLayout, ImageHeader, DEFAULT_RAM_SIZE, DTB_LOAD, GICC_BASE,
+    GICD_BASE, KERNEL_LOAD, RAM_BASE, UART_BASE, UART_IRQ,
 };
 pub use bus::{Bus, MmioDevice};
 pub use clock::{Clock, HostClock, DEFAULT_FREQ_HZ};

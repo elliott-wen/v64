@@ -5,7 +5,7 @@
 mod common;
 
 use aarch64_interp::{GuestMem, StopReason};
-use aarch64_platform::{Board, DTB_LOAD, KERNEL_LOAD};
+use aarch64_platform::{parse_image_header, Board, DTB_LOAD, KERNEL_LOAD, RAM_BASE};
 use common::*;
 
 /// Assemble: write "BOOT\n" to the PL011 data register, then PSCI SYSTEM_OFF.
@@ -47,4 +47,52 @@ fn mini_kernel_prints_and_powers_off() {
     let (stop, board) = boot_and_run(&mini_kernel(), |_| {});
     assert_eq!(stop, StopReason::PoweredOff, "kernel powered off via PSCI");
     assert_eq!(board.uart.take_tx(), b"BOOT\n", "console output captured");
+}
+
+/// A fake arm64 `Image`: header fields set, magic at offset 56, body padded.
+fn fake_image(text_offset: u64, image_size: u64, body_len: usize) -> Vec<u8> {
+    let mut v = vec![0u8; body_len.max(64)];
+    v[8..16].copy_from_slice(&text_offset.to_le_bytes());
+    v[16..24].copy_from_slice(&image_size.to_le_bytes());
+    v[56..60].copy_from_slice(&0x644d_5241u32.to_le_bytes()); // "ARM\x64"
+    v
+}
+
+#[test]
+fn parses_image_header_and_rejects_headerless() {
+    let img = fake_image(0x8_0000, 0x20_0000, 0x1000);
+    let h = parse_image_header(&img).expect("valid magic");
+    assert_eq!(h.text_offset, 0x8_0000);
+    assert_eq!(h.image_size, 0x20_0000);
+    // A raw blob (our mini-kernels) has no magic -> None, so it falls back.
+    assert!(parse_image_header(&[0u8; 64]).is_none());
+}
+
+#[test]
+fn boot_image_lays_out_kernel_initrd_dtb_without_overlap() {
+    let mut board = Board::new(); // 1 GiB
+    let image = fake_image(0x8_0000, 0x20_0000, 0x1000); // 2 MiB span
+    let initrd = vec![0x5Au8; 0x1000];
+
+    let layout = board.boot_image(&image, Some(&initrd), "console=ttyAMA0");
+
+    // Kernel at base + text_offset; initrd 2 MiB-aligned above the 2 MiB span;
+    // DTB 2 MiB-aligned above the initrd.
+    assert_eq!(layout.kernel, RAM_BASE + 0x8_0000);
+    assert_eq!(layout.initrd, Some((RAM_BASE + 0x40_0000, RAM_BASE + 0x40_1000)));
+    assert_eq!(layout.dtb, RAM_BASE + 0x60_0000);
+
+    // Regions are strictly increasing — no overlap.
+    let (istart, iend) = layout.initrd.unwrap();
+    assert!(layout.kernel + 0x20_0000 <= istart && iend <= layout.dtb);
+
+    // Entry state per the boot protocol.
+    assert_eq!(board.machine.cpu.pc, layout.kernel);
+    assert_eq!(board.machine.cpu.x[0], layout.dtb);
+    assert_eq!(board.machine.cpu.daif, 0b1111);
+
+    // Bytes actually landed: kernel magic, initrd fill, DTB magic.
+    assert_eq!(board.machine.bus.read_u32(layout.kernel + 56), 0x644d_5241);
+    assert_eq!(board.machine.bus.read_u8(istart), 0x5A);
+    assert_eq!(board.machine.bus.read_u32(layout.dtb), 0xedfe_0dd0); // DTB magic, BE->LE
 }
