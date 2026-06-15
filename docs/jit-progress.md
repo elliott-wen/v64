@@ -178,6 +178,12 @@ sweep. The first SIMD increment (all bit-exact, no FP) is in `lower/`:
   (`i8x16.popcnt`), NEG, ABS, compare-to-zero (CMGT/CMGE/CMEQ/CMLE/CMLT #0), and
   REV64/16/32 (constant self-shuffle). CLS/CLZ, RBIT, the saturating ops, and the
   shape-changing forms (XTN/SHLL/ADDLP) fall back.
+- **Saturating add/sub** (in `simd/three_same.rs`): SQADD/UQADD/SQSUB/UQSUB for
+  8/16-bit lanes (`iNxM.add_sat_*`/`sub_sat_*`); 32/64-bit fall back (no WASM op).
+- **Widening multiply** (`simd/three_diff.rs`): SMULL/UMULL (and the `2`
+  high-half variants) via `extmul_low/high` — Q selects the source half, U the
+  sign; the result is always full-width. The other three-different forms (widening
+  add/sub/accumulate, SQDMULL, ABDL, PMULL, high-narrowing) fall back.
 - The `lower/simd.rs` file is now a `lower/simd/` dir split by family
   (`three_same`, `copy`, `permute`, `shift`, `two_reg_misc`, `mod`).
 - Validated: `tests/runtime.rs` proves vector LDR/STR Q and D are fully inline

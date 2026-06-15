@@ -20,6 +20,7 @@ use crate::lower::common::at;
 mod copy;
 mod permute;
 mod shift;
+mod three_diff;
 mod three_same;
 mod two_reg_misc;
 
@@ -29,6 +30,7 @@ pub(super) use copy::{
 };
 pub(super) use permute::{simd_ext, simd_tbl, simd_zip_trn};
 pub(super) use shift::simd_shift_imm;
+pub(super) use three_diff::simd_three_diff;
 pub(super) use three_same::simd_three_same;
 pub(super) use two_reg_misc::simd_two_reg_misc;
 

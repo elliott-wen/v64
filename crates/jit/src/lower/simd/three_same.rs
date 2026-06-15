@@ -110,6 +110,27 @@ fn eq(size: u8) -> I<'static> {
 fn simple_op(u: bool, size: u8, opcode: u8) -> Option<I<'static>> {
     use I::*;
     Some(match opcode {
+        // SQADD/UQADD and SQSUB/UQSUB — WASM only has 8/16-bit saturating lanes.
+        0b00001 if !u => match size {
+            0 => I8x16AddSatS,
+            1 => I16x8AddSatS,
+            _ => return None,
+        },
+        0b00001 => match size {
+            0 => I8x16AddSatU,
+            1 => I16x8AddSatU,
+            _ => return None,
+        },
+        0b00101 if !u => match size {
+            0 => I8x16SubSatS,
+            1 => I16x8SubSatS,
+            _ => return None,
+        },
+        0b00101 => match size {
+            0 => I8x16SubSatU,
+            1 => I16x8SubSatU,
+            _ => return None,
+        },
         0b10000 if !u => match size {
             0 => I8x16Add,
             1 => I16x8Add,
