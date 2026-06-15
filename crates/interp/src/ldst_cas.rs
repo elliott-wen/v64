@@ -4,11 +4,11 @@
 use aarch64_cpu_state::CpuState;
 
 use crate::mem_access::{read, write};
-use crate::memory::Memory;
+use crate::memory::GuestMem;
 
 pub(crate) fn exec(
     cpu: &mut CpuState,
-    mem: &mut Memory,
+    mem: &mut dyn GuestMem,
     size: u8,
     rs: u8,
     rn: u8,

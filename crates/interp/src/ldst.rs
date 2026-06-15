@@ -8,12 +8,12 @@ use aarch64_cpu_state::CpuState;
 use aarch64_decoder::AddrMode;
 
 use crate::mem_access;
-use crate::memory::Memory;
+use crate::memory::GuestMem;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec(
     cpu: &mut CpuState,
-    mem: &mut Memory,
+    mem: &mut dyn GuestMem,
     size: u8,
     is_load: bool,
     signed: bool,

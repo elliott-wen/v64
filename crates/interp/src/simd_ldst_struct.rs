@@ -3,7 +3,7 @@
 use aarch64_cpu_state::CpuState;
 
 use crate::mem_access;
-use crate::memory::Memory;
+use crate::memory::GuestMem;
 
 /// Write the low `1<<size` bytes of `val` into element `byte_off` of V[tt].
 fn set_elem(cpu: &mut CpuState, tt: u8, byte_off: u32, size: u8, val: u64) {
@@ -28,7 +28,7 @@ fn get_elem(cpu: &CpuState, tt: u8, byte_off: u32, size: u8) -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn multi(
     cpu: &mut CpuState,
-    mem: &mut Memory,
+    mem: &mut dyn GuestMem,
     is_load: bool,
     q: bool,
     postidx: bool,
@@ -83,7 +83,7 @@ pub(crate) fn multi(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn single(
     cpu: &mut CpuState,
-    mem: &mut Memory,
+    mem: &mut dyn GuestMem,
     is_load: bool,
     replicate: bool,
     postidx: bool,

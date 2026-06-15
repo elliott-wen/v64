@@ -4,7 +4,7 @@ use aarch64_cpu_state::CpuState;
 use aarch64_decoder::{decode, Insn};
 
 use crate::execute::execute;
-use crate::memory::Memory;
+use crate::memory::GuestMem;
 
 /// Why execution stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +21,7 @@ pub enum StopReason {
 /// (`count == 0` means unbounded until `until`). Mirrors Unicorn's
 /// `emu_start(begin, until, _timeout, count)` contract so the two can be
 /// compared directly in the differential harness.
-pub fn run(cpu: &mut CpuState, mem: &mut Memory, until: u64, count: usize) -> StopReason {
+pub fn run(cpu: &mut CpuState, mem: &mut dyn GuestMem, until: u64, count: usize) -> StopReason {
     let mut executed = 0usize;
     loop {
         if cpu.pc == until {
@@ -62,7 +62,7 @@ pub enum Step {
 /// This is the single-step primitive the JIT's `interpret_one` escape hatch is
 /// built on. It mirrors one iteration of [`run`]'s loop body; `run` is left
 /// deliberately independent of it so it stays the untouched reference loop.
-pub fn step(cpu: &mut CpuState, mem: &mut Memory) -> Step {
+pub fn step(cpu: &mut CpuState, mem: &mut dyn GuestMem) -> Step {
     let pc = cpu.pc;
     let word = mem.read_u32(crate::mmu::translate(cpu, mem, pc));
     let insn = decode(word);

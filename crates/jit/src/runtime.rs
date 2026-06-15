@@ -8,7 +8,7 @@
 //! `interpret_one` contract established here are what it builds on.
 
 use aarch64_cpu_state::{regs::offsets, CpuState, GuestRegs};
-use aarch64_interp::Memory as GuestMem;
+use aarch64_interp::MemView;
 use wasmtime::{
     Caller, Engine, Instance, Linker, MemoryType, Module, Store, Memory as WasmMemory,
 };
@@ -178,47 +178,39 @@ impl Vm {
 /// linear memory, and return the next guest PC.
 ///
 /// This is the long-tail escape hatch — generated code calls it for anything not
-/// lowered inline. It is deliberately the slow path: it copies the register
-/// image and guest-RAM window across the interpreter boundary each call. Later
-/// milestones lower common instructions so this runs far less often.
+/// lowered inline. The interpreter runs **directly on the shared linear memory**
+/// (via `interp::MemView`): no copy. The register image and control block live
+/// in the head region below `RAM_BASE`; the guest RAM window lives at/above it,
+/// so `split_at_mut` hands the two to the register sync and the interpreter as
+/// disjoint borrows. Inline lowerings (see `lower/`) bypass this path entirely.
 fn interpret_one(mut caller: Caller<'_, Runtime>, regs_base: i32) -> i64 {
     let wmem = caller.data().memory.expect("memory set");
     let (bytes, rt) = wmem.data_and_store_mut(&mut caller);
     rt.interp_calls += 1;
     let base = regs_base as usize;
 
-    // Hot regs: linear memory -> CpuState (cold state in rt.cpu is preserved).
-    let gr = read_regs(bytes, base);
-    rt.cpu.load_guest_regs(&gr);
+    // head = [0, RAM_BASE): register image + control block.
+    // ram  = guest RAM window the interpreter reads/writes in place.
+    let (head, tail) = bytes.split_at_mut(abi::RAM_BASE as usize);
+    let ram = &mut tail[..rt.ram_bytes];
 
-    // Guest RAM window: linear memory -> a Memory the interpreter can step on.
-    //
-    // PORTABILITY SEAM: this copy-out/copy-back exists only because the native
-    // interpreter's `Memory` owns a `Vec<u8>` and can't view wasmtime's bytes
-    // in place. It is the one piece of the runtime that does NOT survive an
-    // all-wasm deployment: there, the interpreter would itself be a WASM module
-    // importing this same linear memory and would read/write it directly (no
-    // copy). When/if `interp::Memory` becomes a view over a shared backing
-    // store, this whole window-copy disappears and `interpret_one` operates on
-    // `bytes` directly. Inline lowerings (see `lower.rs`) already bypass it.
-    let ram_lo = abi::RAM_BASE as usize;
-    let ram_hi = ram_lo + rt.ram_bytes;
-    let mut gmem = GuestMem { base: rt.guest_base, bytes: bytes[ram_lo..ram_hi].to_vec() };
+    // Hot regs: image -> CpuState (cold state in rt.cpu is preserved).
+    rt.cpu.load_guest_regs(&read_regs(head, base));
 
-    let outcome = aarch64_interp::step(&mut rt.cpu, &mut gmem);
+    let mut view = MemView { base: rt.guest_base, bytes: ram };
+    let outcome = aarch64_interp::step(&mut rt.cpu, &mut view);
 
-    // Write back: RAM window first, then the hot register image.
-    bytes[ram_lo..ram_hi].copy_from_slice(&gmem.bytes);
-    write_regs(bytes, base, &rt.cpu.to_guest_regs());
+    // Hot regs back into the image (RAM writes already landed in linear memory).
+    write_regs(head, base, &rt.cpu.to_guest_regs());
 
     match outcome {
         aarch64_interp::Step::Next(next) => {
-            write_u64(bytes, abi::EXIT_REASON as usize, abi::EXIT_NONE);
+            write_u64(head, abi::EXIT_REASON as usize, abi::EXIT_NONE);
             next as i64
         }
         aarch64_interp::Step::Unsupported { pc, .. } => {
-            write_u64(bytes, abi::EXIT_REASON as usize, abi::EXIT_UNSUPPORTED);
-            write_u64(bytes, abi::EXIT_PC as usize, pc);
+            write_u64(head, abi::EXIT_REASON as usize, abi::EXIT_UNSUPPORTED);
+            write_u64(head, abi::EXIT_PC as usize, pc);
             pc as i64
         }
     }

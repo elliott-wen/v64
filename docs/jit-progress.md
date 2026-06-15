@@ -1,6 +1,6 @@
 # JIT progress / handoff
 
-_Last updated: 2026-06-16 (M0–M6 complete; SIMD Tier 1 — vector load/store, integer three-same, modified-immediate, copy/dup, permute/EXT — lowered)_
+_Last updated: 2026-06-16 (M0–M6 complete; SIMD Tier 1 lowered incl. two-reg-misc / saturating / widening multiply; interp memory behind the `GuestMem` trait so the JIT shares linear memory with no copy)_
 
 ## Where things stand
 
@@ -68,9 +68,8 @@ in [isa-coverage.md](isa-coverage.md).
     inlined (it's a branch/exception) so it always returns via `interpret_one`.
   - `runtime.rs`: `run_block` catches WASM traps (e.g. inline OOB access) and
     surfaces them as `EXIT_FAULT` at the faulting PC instead of a host panic.
-    The RAM-copy in `interpret_one` is now flagged as the **portability seam**
-    (the one piece an all-wasm/browser deployment replaces with direct shared-
-    memory access; inline lowerings already bypass it).
+    `interpret_one` runs the interpreter **directly on the shared linear memory**
+    via `interp::MemView` (no copy) — see the GuestMem-trait refactor below.
   - `abi.rs`: added `EXIT_FAULT`.
   - **Inline-vs-helper assumption** (documented in `lower.rs`): inline accesses
     assume identity mapping (MMU off), which is the runtime's only mode today.
@@ -190,13 +189,36 @@ sweep. The first SIMD increment (all bit-exact, no FP) is in `lower/`:
   (`interp_calls()==0`); the `jit_sweep` `neon_*` and `ldst_vec_*` classes pass
   against the interpreter at 8k+ iters.
 
+## Shared memory: the `GuestMem` trait (browser-port prerequisite)
+
+`interp::Memory` was an *owned* `Vec<u8>`, so `interpret_one` had to copy the
+guest-RAM window out of wasmtime linear memory and back on every call. That copy
+is gone:
+- `interp/src/memory.rs` now defines a **`GuestMem` trait** (sized little-endian
+  loads/stores), with two implementations: the owned `Memory { base, bytes:
+  Vec<u8> }` (native execution, tests, the Unicorn oracle) and a borrowed
+  `MemView<'a> { base, bytes: &'a mut [u8] }`. The interpreter's executors take
+  `&mut dyn GuestMem`; callers passing a concrete `&mut Memory` unsize-coerce
+  automatically, so only interp-internal signatures changed.
+- `jit::interpret_one` `split_at_mut`s the shared linear memory into the register
+  image (head) and the guest RAM window (tail), wraps the window in a `MemView`,
+  and steps the interpreter on it **in place** — no copy.
+- Why a trait (not a lifetime-`Memory<'a>`): the trait's primitive is the *sized
+  access*, so a future MMU/MMIO backing can dispatch to a handler instead of
+  indexing a buffer (a flat slice can't). `dyn` is fine here — the interpreter is
+  the cold/reference path; if it ever needs to be fast, switch to generic
+  `<M: GuestMem>` for zero-overhead monomorphization, same trait.
+- This is the one structural change the all-wasm/browser port needs: there the
+  interpreter is itself a WASM module importing the shared `WebAssembly.Memory`,
+  which it accesses as exactly this kind of borrowed view.
+
 ## Next: push SIMD further
 
 Still on the interpreter fallback (good follow-ups, in rough value order):
-**Tier 1 cont.** — saturating add/sub (SQADD/UQADD 8/16-bit → `iNxM.add_sat_*`),
-widening multiply (SMULL/UMULL → `extmul`), pairwise add (`extadd_pairwise`),
-across-lanes reductions (need log-step shuffle+op), RBIT/CLS/CLZ (no direct WASM
-op). **Tier 2 (careful)** — FP three-same/two-reg (`f32x4`/`f64x2`), watching the
+**Tier 1 cont.** — pairwise add (`extadd_pairwise`), across-lanes reductions
+(need log-step shuffle+op), RBIT/CLS/CLZ (no direct WASM op), the widening
+add/sub/accumulate forms. **Tier 2 (careful)** — FP three-same/two-reg
+(`f32x4`/`f64x2`), watching the
 sweep for NaN/rounding/FPCR divergence WASM won't match bit-for-bit. The decoder
 variants are all in `decoder/src/insn.rs` (`Simd*`); each interp handler in
 `interp/src/simd_*.rs` is the semantics reference.

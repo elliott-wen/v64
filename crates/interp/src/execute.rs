@@ -7,7 +7,7 @@
 use aarch64_cpu_state::CpuState;
 use aarch64_decoder::Insn;
 
-use crate::memory::Memory;
+use crate::memory::GuestMem;
 use crate::{
     add_sub_carry, add_sub_ext_reg, add_sub_imm, add_sub_shifted_reg, bitfield, branch_imm,
     branch_reg, compare_branch, cond_branch, cond_compare, cond_select, data_proc_1src,
@@ -20,7 +20,7 @@ use crate::{
     test_branch,
 };
 
-pub(crate) fn execute(cpu: &mut CpuState, mem: &mut Memory, insn: Insn, pc: u64) -> Option<u64> {
+pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc: u64) -> Option<u64> {
     match insn {
         Insn::MoveWide { sf, opc, hw, imm16, rd } => move_wide::exec(cpu, sf, opc, hw, imm16, rd),
         Insn::AddSubImm { sf, sub, set_flags, shift12, imm12, rn, rd } => {

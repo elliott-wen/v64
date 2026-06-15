@@ -5,10 +5,10 @@
 
 use aarch64_cpu_state::CpuState;
 
-use crate::memory::Memory;
+use crate::memory::GuestMem;
 use crate::mmu;
 
-pub(crate) fn read(cpu: &CpuState, mem: &Memory, va: u64, size: u8) -> u64 {
+pub(crate) fn read(cpu: &CpuState, mem: &dyn GuestMem, va: u64, size: u8) -> u64 {
     let pa = mmu::translate(cpu, mem, va);
     match size {
         0 => u64::from(mem.read_u8(pa)),
@@ -18,7 +18,7 @@ pub(crate) fn read(cpu: &CpuState, mem: &Memory, va: u64, size: u8) -> u64 {
     }
 }
 
-pub(crate) fn write(cpu: &CpuState, mem: &mut Memory, va: u64, size: u8, val: u64) {
+pub(crate) fn write(cpu: &CpuState, mem: &mut dyn GuestMem, va: u64, size: u8, val: u64) {
     let pa = mmu::translate(cpu, &*mem, va);
     match size {
         0 => mem.write_u8(pa, val as u8),
@@ -29,7 +29,7 @@ pub(crate) fn write(cpu: &CpuState, mem: &mut Memory, va: u64, size: u8, val: u6
 }
 
 /// Read `1 << log2` bytes (log2 0..=4) into a u128, for SIMD/FP accesses.
-pub(crate) fn read_vec(cpu: &CpuState, mem: &Memory, va: u64, log2: u8) -> u128 {
+pub(crate) fn read_vec(cpu: &CpuState, mem: &dyn GuestMem, va: u64, log2: u8) -> u128 {
     let pa = mmu::translate(cpu, mem, va);
     let mut v = 0u128;
     for i in 0..(1u64 << log2) {
@@ -39,7 +39,7 @@ pub(crate) fn read_vec(cpu: &CpuState, mem: &Memory, va: u64, log2: u8) -> u128 
 }
 
 /// Write the low `1 << log2` bytes of `val` to memory.
-pub(crate) fn write_vec(cpu: &CpuState, mem: &mut Memory, va: u64, log2: u8, val: u128) {
+pub(crate) fn write_vec(cpu: &CpuState, mem: &mut dyn GuestMem, va: u64, log2: u8, val: u128) {
     let pa = mmu::translate(cpu, &*mem, va);
     for i in 0..(1u64 << log2) {
         mem.write_u8(pa + i, (val >> (i * 8)) as u8);

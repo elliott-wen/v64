@@ -2,7 +2,7 @@
 
 use aarch64_cpu_state::CpuState;
 use aarch64_decoder::sysreg_key;
-use aarch64_interp::{translate, Memory};
+use aarch64_interp::{translate, GuestMem, Memory};
 
 fn set(cpu: &mut CpuState, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32, v: u64) {
     cpu.sysregs.insert(sysreg_key(op0, op1, crn, crm, op2), v);

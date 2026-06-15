@@ -12,7 +12,7 @@
 use aarch64_cpu_state::CpuState;
 use aarch64_decoder::sysreg_key;
 
-use crate::memory::Memory;
+use crate::memory::GuestMem;
 
 /// Output-address mask for a 4KB-granule descriptor (bits [47:12]).
 const OA_MASK: u64 = 0x0000_ffff_ffff_f000;
@@ -27,7 +27,7 @@ fn mmu_enabled(cpu: &CpuState) -> bool {
 
 /// Translate a virtual address to physical. Identity when the MMU is off.
 #[must_use]
-pub fn translate(cpu: &CpuState, mem: &Memory, va: u64) -> u64 {
+pub fn translate(cpu: &CpuState, mem: &dyn GuestMem, va: u64) -> u64 {
     if !mmu_enabled(cpu) {
         return va;
     }
@@ -41,7 +41,7 @@ pub fn translate(cpu: &CpuState, mem: &Memory, va: u64) -> u64 {
 }
 
 /// Walk the 4KB-granule tables from `table_base` (a physical address).
-fn walk(mem: &Memory, mut table_base: u64, va: u64, tsz: u32) -> u64 {
+fn walk(mem: &dyn GuestMem, mut table_base: u64, va: u64, tsz: u32) -> u64 {
     let mut level = starting_level(tsz);
     loop {
         let shift = 39 - level * 9; // L0=39, L1=30, L2=21, L3=12
