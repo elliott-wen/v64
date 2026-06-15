@@ -169,8 +169,17 @@ sweep. The first SIMD increment (all bit-exact, no FP) is in `lower/`:
   `UMOV/SMOV` (lane → GPR, zero/sign-extend), `INS` general (GPR → lane) and
   element (lane → lane), `DUP` general (GPR → `iNxM.splat`) and element
   (lane → splat).
-- **Permutes** (`simd.rs`): `ZIP1/2`, `UZP1/2`, `TRN1/2`, and `EXT` as constant
-  `i8x16.shuffle` patterns computed at emit time; `!q` masks the high half.
+- **Permutes** (`simd/permute.rs`): `ZIP1/2`, `UZP1/2`, `TRN1/2`, `EXT`, and
+  single-table `TBL` (→ `i8x16.swizzle`) as constant shuffles computed at emit
+  time; `!q` masks the high half.
+- **Shift-by-immediate** (`simd/shift.rs`): SHL, SSHR, USHR (full-width shifts
+  handled specially since WASM lane shifts mask the amount).
+- **Two-register-misc integer** (`simd/two_reg_misc.rs`): NOT, CNT
+  (`i8x16.popcnt`), NEG, ABS, compare-to-zero (CMGT/CMGE/CMEQ/CMLE/CMLT #0), and
+  REV64/16/32 (constant self-shuffle). CLS/CLZ, RBIT, the saturating ops, and the
+  shape-changing forms (XTN/SHLL/ADDLP) fall back.
+- The `lower/simd.rs` file is now a `lower/simd/` dir split by family
+  (`three_same`, `copy`, `permute`, `shift`, `two_reg_misc`, `mod`).
 - Validated: `tests/runtime.rs` proves vector LDR/STR Q and D are fully inline
   (`interp_calls()==0`); the `jit_sweep` `neon_*` and `ldst_vec_*` classes pass
   against the interpreter at 8k+ iters.
@@ -178,11 +187,11 @@ sweep. The first SIMD increment (all bit-exact, no FP) is in `lower/`:
 ## Next: push SIMD further
 
 Still on the interpreter fallback (good follow-ups, in rough value order):
-**Tier 1 cont.** — `TBL/TBX` (single-table → `i8x16.swizzle`; out-of-range → 0
-matches), shift-by-immediate (SHL/SSHR/USHR via `iNxM.shl/shr_s/shr_u`),
-across-lanes / pairwise reductions. **Tier 2 (careful)** — FP three-same/two-reg
-(`f32x4`/`f64x2`), watching the sweep for NaN/rounding/FPCR divergence WASM won't
-match bit-for-bit; saturating integer ops; widening (three-diff). The decoder
+**Tier 1 cont.** — saturating add/sub (SQADD/UQADD 8/16-bit → `iNxM.add_sat_*`),
+widening multiply (SMULL/UMULL → `extmul`), pairwise add (`extadd_pairwise`),
+across-lanes reductions (need log-step shuffle+op), RBIT/CLS/CLZ (no direct WASM
+op). **Tier 2 (careful)** — FP three-same/two-reg (`f32x4`/`f64x2`), watching the
+sweep for NaN/rounding/FPCR divergence WASM won't match bit-for-bit. The decoder
 variants are all in `decoder/src/insn.rs` (`Simd*`); each interp handler in
 `interp/src/simd_*.rs` is the semantics reference.
 

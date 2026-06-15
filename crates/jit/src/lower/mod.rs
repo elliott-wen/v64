@@ -101,6 +101,10 @@ pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, guest_bas
             let ok = simd::simd_three_same(f, q, u, size, opcode, rm, rn, rd);
             return finish(f, pc, ok);
         }
+        Insn::SimdTwoRegMisc { q, u, size, opcode, rn, rd } => {
+            let ok = simd::simd_two_reg_misc(f, q, u, size, opcode, rn, rd);
+            return finish(f, pc, ok);
+        }
         Insn::SimdModImm { q, op, cmode, imm8, rd } => {
             let ok = simd::simd_mod_imm(f, q, op, cmode, imm8, rd);
             return finish(f, pc, ok);

@@ -3,17 +3,7 @@
 
 use wasm_encoder::{Function, Instruction as I};
 
-use super::{finish_v, push_v};
-
-/// Emit `Vd = shuffle(Vn, Vm)` with a constant 16-byte lane pattern, masking the
-/// high half for the 64-bit (`!q`) form.
-fn shuffle2(f: &mut Function, q: bool, rn: u8, rm: u8, rd: u8, lanes: [u8; 16]) {
-    emit!(f, I::LocalGet(0)); // base for the store
-    push_v(f, rn); // operand a (lanes 0..16)
-    push_v(f, rm); // operand b (lanes 16..32)
-    emit!(f, I::I8x16Shuffle(lanes));
-    finish_v(f, q, rd);
-}
+use super::{finish_v, push_v, shuffle2};
 
 /// ZIP1/2, UZP1/2, TRN1/2 — interleave/deinterleave/transpose. Always handled.
 pub(crate) fn simd_zip_trn(f: &mut Function, q: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8) {
