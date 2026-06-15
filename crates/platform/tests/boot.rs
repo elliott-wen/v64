@@ -23,7 +23,7 @@ fn mini_kernel() -> Vec<u8> {
 
 #[test]
 fn boot_sets_entry_registers_and_loads_images() {
-    let mut board = Board::new(RAM_SIZE);
+    let mut board = Board::with_ram(RAM_SIZE);
     let kernel = [0xAAu8, 0xBB, 0xCC, 0xDD];
     let dtb = board.dtb(RAM_SIZE as u64, "console=ttyAMA0", None);
 

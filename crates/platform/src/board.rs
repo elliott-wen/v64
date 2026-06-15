@@ -21,6 +21,10 @@ pub const KERNEL_LOAD: u64 = RAM_BASE + 0x8_0000;
 /// Where the DTB is placed — clear of the kernel image, 8-byte aligned.
 pub const DTB_LOAD: u64 = RAM_BASE + 0x100_0000;
 
+/// Default guest RAM: 1 GiB — enough headroom for a real `defconfig` kernel
+/// (~tens of MiB) plus its decompression/init and an initramfs.
+pub const DEFAULT_RAM_SIZE: usize = 1 << 30;
+
 /// PSTATE.DAIF all-masked, as required on kernel entry.
 const DAIF_MASKED: u8 = 0b1111;
 
@@ -32,9 +36,15 @@ pub struct Board {
 }
 
 impl Board {
+    /// Build the board with the default 1 GiB of RAM and all devices mapped.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_ram(DEFAULT_RAM_SIZE)
+    }
+
     /// Build the board with `ram_size` bytes of RAM and all devices mapped.
     #[must_use]
-    pub fn new(ram_size: usize) -> Self {
+    pub fn with_ram(ram_size: usize) -> Self {
         let gic = Gic::new();
         let uart = Uart::new(gic.clone(), UART_IRQ);
 
@@ -77,5 +87,11 @@ impl Board {
         cpu.set_el_spsel(1, true); // EL1h
         cpu.daif = DAIF_MASKED;
         cpu.powered_off = false;
+    }
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Self::new()
     }
 }

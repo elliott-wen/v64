@@ -164,7 +164,7 @@ impl Asm {
 /// run to power-off/limit, and return the stop reason plus the board (so tests
 /// can inspect UART output, memory, or registers afterward).
 pub fn boot_and_run(image: &[u8], prepare: impl FnOnce(&mut Board)) -> (StopReason, Board) {
-    let mut board = Board::new(RAM_SIZE);
+    let mut board = Board::with_ram(RAM_SIZE);
     let dtb = board.dtb(RAM_SIZE as u64, "console=ttyAMA0", None);
     board.boot(image, &dtb);
     prepare(&mut board);
