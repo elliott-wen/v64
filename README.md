@@ -11,8 +11,13 @@ crates/
   cpu/        aarch64-cpu-state  — register file, NZCV flags (CpuState)
   decoder/    aarch64-decoder    — pure u32 -> Insn, split per encoding group
   interp/     aarch64-interp     — fetch/decode/execute loop, ALU, memory
+  jit/        aarch64-jit        — WASM block JIT sharing the interp's memory
+  platform/   aarch64-platform   — bus, GICv2, timer, PL011, PSCI, DTB, board
   difftest/   aarch64-difftest   — cross-check our interpreter vs Unicorn
 ```
+
+Progress / handoff notes live in [docs/](docs/): `jit-progress.md`,
+`platform-progress.md`, `isa-coverage.md`.
 
 Each crate keeps modules small and single-purpose (e.g. the decoder has
 `dp_imm.rs`, `dp_reg.rs`, `branch.rs`; the interpreter has `alu.rs`,
