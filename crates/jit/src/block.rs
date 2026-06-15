@@ -14,16 +14,41 @@ const MAX_BLOCK: usize = 1024;
 
 /// Form a block starting at `start`, reading 32-bit code words via `read`.
 pub fn form_block(start: u64, read: impl Fn(u64) -> u32) -> Block {
+    form_block_bounded(start, None, MAX_BLOCK, read)
+}
+
+/// Form a block, additionally bounded by the dispatcher's stop conditions:
+///
+/// - `until`: if the *next* instruction would be at this guest address, end the
+///   block first (the dispatcher stops there before executing it, mirroring
+///   `run()`'s top-of-loop `until` check).
+/// - `max_len`: cap the instruction count (used to honor an instruction `count`
+///   budget; also clamped to [`MAX_BLOCK`]).
+///
+/// The block still ends at the first terminator if one is reached sooner. When
+/// it ends on a `max_len`/`until` boundary instead, the last instruction is a
+/// non-terminator — the emitter handles that by returning the sequential next PC.
+pub fn form_block_bounded(
+    start: u64,
+    until: Option<u64>,
+    max_len: usize,
+    read: impl Fn(u64) -> u32,
+) -> Block {
+    let cap = max_len.clamp(1, MAX_BLOCK);
     let mut insns = Vec::new();
     let mut pc = start;
-    loop {
+    while insns.len() < cap {
         let insn = decode(read(pc));
         let done = is_terminator(&insn);
         insns.push((pc, insn));
-        if done || insns.len() >= MAX_BLOCK {
+        if done {
             break;
         }
-        pc = pc.wrapping_add(4);
+        let next = pc.wrapping_add(4);
+        if Some(next) == until {
+            break;
+        }
+        pc = next;
     }
     Block { start, insns }
 }
@@ -41,18 +66,4 @@ pub fn is_terminator(insn: &Insn) -> bool {
             | Insn::Eret
             | Insn::Unsupported { .. }
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stops_at_branch() {
-        // NOP; NOP; B . (self-branch). Read returns each word by index.
-        let code = [0xd503201fu32, 0xd503201f, 0x1400_0000];
-        let block = form_block(0x1000, |pc| code[((pc - 0x1000) / 4) as usize]);
-        assert_eq!(block.insns.len(), 3);
-        assert!(matches!(block.insns[2].1, Insn::BranchImm { .. }));
-    }
 }

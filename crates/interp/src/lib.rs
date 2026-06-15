@@ -74,4 +74,4 @@ pub use alu::{add_with_carry, add_with_carry_in, apply_shift};
 pub use cond::eval_cond;
 pub use memory::Memory;
 pub use mmu::translate;
-pub use run::{run, StopReason};
+pub use run::{run, step, Step, StopReason};

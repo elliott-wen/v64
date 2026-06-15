@@ -1,275 +1,12 @@
-//! Encoders for Advanced SIMD (vector) classes. They reuse the FP fuzz harness
-//! (random V0..V31, compared after the run).
+//! Vector-SIMD encoders: three-same/-different, by-element, two-reg-misc,
+//! modified-immediate, DUP/INS/MOV, permute/EXT/TBL, shift, and across-lanes.
 
-use super::random_v;
-use crate::fuzz::FpClass;
+use super::{enc, FPCR_DN};
+use crate::encoders::random_v;
 use crate::rng::Rng;
 use crate::FpEncoded;
 
-/// FPCR with DN=1 (default NaN) for deterministic FP results.
-const FPCR_DN: u64 = 1 << 25;
-
-fn enc(word: u32, rng: &mut Rng) -> FpEncoded {
-    FpEncoded { word, init_v: random_v(rng), gpr_seeds: vec![], fpcr: 0 }
-}
-
-pub(super) fn classes() -> Vec<FpClass> {
-    vec![
-        FpClass { name: "neon_three_same", encode: three_same },
-        FpClass { name: "neon_three_diff", encode: three_diff },
-        FpClass { name: "neon_indexed", encode: indexed },
-        FpClass { name: "neon_three_same_fp", encode: three_same_fp },
-        FpClass { name: "neon_two_reg_misc", encode: two_reg_misc },
-        FpClass { name: "neon_two_reg_misc_fp", encode: two_reg_misc_fp },
-        FpClass { name: "neon_mod_imm", encode: mod_imm },
-        FpClass { name: "neon_dup", encode: dup_general },
-        FpClass { name: "neon_dup_element", encode: dup_element },
-        FpClass { name: "neon_ins", encode: ins },
-        FpClass { name: "neon_mov_gpr", encode: mov_gpr },
-        FpClass { name: "neon_zip_trn", encode: zip_trn },
-        FpClass { name: "neon_ext", encode: ext },
-        FpClass { name: "neon_tbl", encode: tbl },
-        FpClass { name: "neon_aes", encode: aes },
-        FpClass { name: "neon_sha3", encode: sha3 },
-        FpClass { name: "neon_sha2", encode: sha2 },
-        FpClass { name: "neon_three_same_extra", encode: three_same_extra },
-        FpClass { name: "neon_shift_imm", encode: shift_imm },
-        FpClass { name: "neon_across", encode: across },
-        FpClass { name: "neon_scalar_three_same", encode: scalar_three_same },
-        FpClass { name: "neon_scalar_two_reg_misc", encode: scalar_two_reg_misc },
-        FpClass { name: "neon_scalar_pairwise", encode: scalar_pairwise },
-        FpClass { name: "neon_scalar_three_diff", encode: scalar_three_diff },
-        FpClass { name: "neon_scalar_copy", encode: scalar_copy },
-        FpClass { name: "neon_scalar_indexed", encode: scalar_indexed },
-        FpClass { name: "neon_scalar_shift", encode: scalar_shift },
-    ]
-}
-
-fn fp_enc(word: u32, rng: &mut Rng) -> FpEncoded {
-    FpEncoded { word, init_v: random_v(rng), gpr_seeds: vec![], fpcr: FPCR_DN }
-}
-
-fn scalar_three_same(rng: &mut Rng) -> FpEncoded {
-    if rng.below(2) == 0 {
-        let fps = [0x1bu32, 0x1f, 0x3f, 0x5d, 0x7d, 0x1c, 0x5c, 0x7c, 0x7a];
-        let fp = fps[rng.below(fps.len() as u32) as usize];
-        let (u, b5, op5) = ((fp >> 6) & 1, (fp >> 5) & 1, fp & 0x1f);
-        let size = (b5 << 1) | rng.below(2);
-        let word = sts_word(u, size, op5, rng);
-        return fp_enc(word, rng);
-    }
-    // (opcode, size-rule): 0=any, 1=size3, 2=size 1|2.
-    let table: &[(u32, u32)] = &[
-        (1, 0), (5, 0), (9, 0), (0xb, 0),
-        (8, 1), (0xa, 1), (6, 1), (7, 1), (0x11, 1), (0x10, 1),
-        (0x16, 2),
-    ];
-    let (op, rule) = table[rng.below(table.len() as u32) as usize];
-    let u = rng.below(2);
-    let size = match rule {
-        1 => 3,
-        2 => 1 + rng.below(2),
-        _ => rng.below(4),
-    };
-    let word = sts_word(u, size, op, rng);
-    enc(word, rng)
-}
-
-fn sts_word(u: u32, size: u32, opcode: u32, rng: &mut Rng) -> u32 {
-    (1 << 30)
-        | (u << 29)
-        | (0b11110 << 24)
-        | (size << 22)
-        | (1 << 21)
-        | (rng.bits(5) << 16)
-        | (opcode << 11)
-        | (1 << 10)
-        | (rng.bits(5) << 5)
-        | rng.bits(5)
-}
-
-fn scalar_two_reg_misc(rng: &mut Rng) -> FpEncoded {
-    if rng.below(2) == 0 {
-        let fps = [
-            0x2cu32, 0x2d, 0x2e, 0x6c, 0x6d, 0x1d, 0x5d, 0x1a, 0x1b, 0x3a, 0x3b, 0x5a, 0x5b, 0x7a,
-            0x7b, 0x1c, 0x5c,
-        ];
-        let fp = fps[rng.below(fps.len() as u32) as usize];
-        let (u, b5, op5) = ((fp >> 6) & 1, (fp >> 5) & 1, fp & 0x1f);
-        let size = (b5 << 1) | rng.below(2);
-        let word = strm_word(u, size, op5, rng);
-        return fp_enc(word, rng);
-    }
-    // (opcode, u-fixed (2=either), size-rule)
-    let table: &[(u32, u32, u32)] = &[
-        (0x3, 2, 0), (0x7, 2, 0),
-        (0x8, 2, 1), (0x9, 2, 1), (0xa, 0, 1), (0xb, 2, 1),
-        (0x12, 1, 2), (0x14, 2, 2),
-    ];
-    let (op, ufix, rule) = table[rng.below(table.len() as u32) as usize];
-    let u = if ufix == 2 { rng.below(2) } else { ufix };
-    let size = match rule {
-        1 => 3,
-        2 => rng.below(3),
-        _ => rng.below(4),
-    };
-    let word = strm_word(u, size, op, rng);
-    enc(word, rng)
-}
-
-fn strm_word(u: u32, size: u32, opcode: u32, rng: &mut Rng) -> u32 {
-    (1 << 30)
-        | (u << 29)
-        | (0b11110 << 24)
-        | (size << 22)
-        | (0b10000 << 17)
-        | (opcode << 12)
-        | (0b10 << 10)
-        | (rng.bits(5) << 5)
-        | rng.bits(5)
-}
-
-fn scalar_pairwise(rng: &mut Rng) -> FpEncoded {
-    if rng.below(2) == 0 {
-        // ADDP: u=0, size=3, opcode5=0x1b.
-        let word = sp_word(0, 3, 0x1b, rng);
-        return enc(word, rng);
-    }
-    let fulls = [0xcu32, 0xd, 0xf, 0x2c, 0x2f];
-    let full = fulls[rng.below(fulls.len() as u32) as usize];
-    let (b5, op5) = ((full >> 5) & 1, full & 0x1f);
-    let size = (b5 << 1) | rng.below(2);
-    let word = sp_word(1, size, op5, rng);
-    fp_enc(word, rng)
-}
-
-fn sp_word(u: u32, size: u32, opcode: u32, rng: &mut Rng) -> u32 {
-    (1 << 30)
-        | (u << 29)
-        | (0b11110 << 24)
-        | (size << 22)
-        | (0b11000 << 17)
-        | (opcode << 12)
-        | (0b10 << 10)
-        | (rng.bits(5) << 5)
-        | rng.bits(5)
-}
-
-fn scalar_three_diff(rng: &mut Rng) -> FpEncoded {
-    let op = [0x9u32, 0xb, 0xd][rng.below(3) as usize];
-    let size = 1 + rng.below(2);
-    let word = (1 << 30)
-        | (0b11110 << 24)
-        | (size << 22)
-        | (1 << 21)
-        | (rng.bits(5) << 16)
-        | (op << 12)
-        | (rng.bits(5) << 5)
-        | rng.bits(5);
-    enc(word, rng)
-}
-
-fn scalar_copy(rng: &mut Rng) -> FpEncoded {
-    let size = rng.below(4);
-    let index = rng.below(16 >> size);
-    let imm5 = (index << (size + 1)) | (1 << size);
-    let word = (1 << 30)
-        | (0b11110 << 24)
-        | (imm5 << 16)
-        | (1 << 10)
-        | (rng.bits(5) << 5)
-        | rng.bits(5);
-    enc(word, rng)
-}
-
-fn scalar_indexed(rng: &mut Rng) -> FpEncoded {
-    let ops: &[(u32, u32, bool)] = &[
-        (0, 0b0011, false), // SQDMLAL
-        (0, 0b0111, false), // SQDMLSL
-        (0, 0b1011, false), // SQDMULL
-        (0, 0b1100, false), // SQDMULH
-        (0, 0b1101, false), // SQRDMULH
-        (0, 0b0001, true),  // FMLA
-        (0, 0b0101, true),  // FMLS
-        (0, 0b1001, true),  // FMUL
-        (1, 0b1001, true),  // FMULX
-    ];
-    let (u, opcode, is_fp) = ops[rng.below(ops.len() as u32) as usize];
-    let (size, h, l, m, rm4) = if is_fp {
-        if rng.below(2) == 0 {
-            let idx = rng.below(4);
-            let rm5 = rng.bits(5);
-            (2u32, idx >> 1, idx & 1, rm5 >> 4, rm5 & 0xf)
-        } else {
-            let idx = rng.below(2);
-            let rm5 = rng.bits(5);
-            (3u32, idx, 0, rm5 >> 4, rm5 & 0xf)
-        }
-    } else if rng.below(2) == 0 {
-        let idx = rng.below(8);
-        (1u32, idx >> 2, (idx >> 1) & 1, idx & 1, rng.bits(4))
-    } else {
-        let idx = rng.below(4);
-        let rm5 = rng.bits(5);
-        (2u32, idx >> 1, idx & 1, rm5 >> 4, rm5 & 0xf)
-    };
-    let word = (1 << 30)
-        | (u << 29)
-        | (0b11111 << 24)
-        | (size << 22)
-        | (l << 21)
-        | (m << 20)
-        | (rm4 << 16)
-        | (opcode << 12)
-        | (h << 11)
-        | (rng.bits(5) << 5)
-        | rng.bits(5);
-    FpEncoded { word, init_v: random_v(rng), gpr_seeds: vec![], fpcr: if is_fp { FPCR_DN } else { 0 } }
-}
-
-fn scalar_shift(rng: &mut Rng) -> FpEncoded {
-    // (opcode, u-fixed (2=either), size-kind): 0=D-only,1=any,2=narrow(<=2),3=conv(2|3)
-    let table: &[(u32, u32, u32)] = &[
-        (0b00000, 2, 0), (0b00010, 2, 0), (0b00100, 2, 0), (0b00110, 2, 0),
-        (0b01000, 1, 0), (0b01010, 2, 0),
-        (0b01100, 1, 1), (0b01110, 2, 1),
-        (0b10000, 1, 2), (0b10001, 1, 2), (0b10010, 2, 2), (0b10011, 2, 2),
-        (0b11100, 2, 3), (0b11111, 2, 3),
-    ];
-    let (opcode, ufix, kind) = table[rng.below(table.len() as u32) as usize];
-    let u = if ufix == 2 { rng.below(2) } else { ufix };
-    let (immh, immb) = match kind {
-        0 => (0b1000 | rng.below(8), rng.below(8)),     // D-only (size 3)
-        3 => {
-            let size = 2 + rng.below(2);
-            ((1 << size) | rng.below(1 << size), rng.below(8))
-        }
-        2 => {
-            let size = rng.below(3);
-            ((1 << size) | rng.below(1 << size), rng.below(8))
-        }
-        _ => {
-            let size = rng.below(4);
-            ((1 << size) | rng.below(1 << size), rng.below(8))
-        }
-    };
-    let word = (1 << 30)
-        | (u << 29)
-        | (0b11111 << 24)
-        | (immh << 19)
-        | (immb << 16)
-        | (opcode << 11)
-        | (1 << 10)
-        | (rng.bits(5) << 5)
-        | rng.bits(5);
-    let mut e = enc(word, rng);
-    if matches!(opcode, 0b11100 | 0b11111) {
-        e.fpcr = FPCR_DN;
-    }
-    e
-}
-
-fn across(rng: &mut Rng) -> FpEncoded {
+pub(super) fn across(rng: &mut Rng) -> FpEncoded {
     let (opcode, u) = match rng.below(5) {
         0 => (0b11011u32, 0), // ADDV
         1 => (0b01010, 0),    // SMAXV
@@ -291,7 +28,7 @@ fn across(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn shift_imm(rng: &mut Rng) -> FpEncoded {
+pub(super) fn shift_imm(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     // (opcode, u). u==2 means "either" (random U with both allocated).
     let table: &[(u32, u32)] = &[
@@ -348,7 +85,7 @@ fn shift_imm(rng: &mut Rng) -> FpEncoded {
     e
 }
 
-fn zip_trn(rng: &mut Rng) -> FpEncoded {
+pub(super) fn zip_trn(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     let opcode = [0b001u32, 0b010, 0b011, 0b101, 0b110, 0b111][rng.below(6) as usize];
     let size = if q == 1 { rng.below(4) } else { rng.below(3) }; // D needs Q=1
@@ -363,13 +100,7 @@ fn zip_trn(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn aes(rng: &mut Rng) -> FpEncoded {
-    let opcode = 0x4 + rng.below(4); // AESE/AESD/AESMC/AESIMC
-    let word = 0x4e28_0800 | (opcode << 12) | (rng.bits(5) << 5) | rng.bits(5);
-    enc(word, rng)
-}
-
-fn three_same_extra(rng: &mut Rng) -> FpEncoded {
+pub(super) fn three_same_extra(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     // (u, opcode, size).
     let (u, opcode, size) = match rng.below(4) {
@@ -391,19 +122,7 @@ fn three_same_extra(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn sha3(rng: &mut Rng) -> FpEncoded {
-    let opcode = rng.below(7); // SHA1C/P/M/SU0, SHA256H/H2/SU1
-    let word = 0x5e00_0000 | (rng.bits(5) << 16) | (opcode << 12) | (rng.bits(5) << 5) | rng.bits(5);
-    enc(word, rng)
-}
-
-fn sha2(rng: &mut Rng) -> FpEncoded {
-    let opcode = rng.below(3); // SHA1H/SHA1SU1/SHA256SU0
-    let word = 0x5e28_0800 | (opcode << 12) | (rng.bits(5) << 5) | rng.bits(5);
-    enc(word, rng)
-}
-
-fn tbl(rng: &mut Rng) -> FpEncoded {
+pub(super) fn tbl(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     let len = rng.below(4);
     let op = rng.below(2); // TBL / TBX
@@ -417,7 +136,7 @@ fn tbl(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn ext(rng: &mut Rng) -> FpEncoded {
+pub(super) fn ext(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     let imm4 = if q == 1 { rng.below(16) } else { rng.below(8) };
     let word = (q << 30)
@@ -438,7 +157,7 @@ fn imm5_for(size: u32, index: u32) -> u32 {
     (index << (size + 1)) | (1 << size)
 }
 
-fn dup_element(rng: &mut Rng) -> FpEncoded {
+pub(super) fn dup_element(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     let size = if q == 1 { rng.below(4) } else { rng.below(3) }; // D needs Q=1
     let index = rng.below(16 >> size);
@@ -446,7 +165,7 @@ fn dup_element(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn ins(rng: &mut Rng) -> FpEncoded {
+pub(super) fn ins(rng: &mut Rng) -> FpEncoded {
     let size = rng.below(4);
     let dst = rng.below(16 >> size);
     let imm5 = imm5_for(size, dst);
@@ -461,13 +180,13 @@ fn ins(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn mov_gpr(rng: &mut Rng) -> FpEncoded {
+pub(super) fn mov_gpr(rng: &mut Rng) -> FpEncoded {
     let signed = rng.below(2) == 0;
     let q = rng.below(2);
     let size = match (signed, q == 1) {
-        (true, true) => rng.below(3),  // SMOV Xd: B/H/S
-        (true, false) => rng.below(2), // SMOV Wd: B/H
-        (false, true) => 3,            // UMOV Xd: D
+        (true, true) => rng.below(3),   // SMOV Xd: B/H/S
+        (true, false) => rng.below(2),  // SMOV Wd: B/H
+        (false, true) => 3,             // UMOV Xd: D
         (false, false) => rng.below(3), // UMOV Wd: B/H/S
     };
     let index = rng.below(16 >> size);
@@ -476,7 +195,7 @@ fn mov_gpr(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn three_same_fp(rng: &mut Rng) -> FpEncoded {
+pub(super) fn three_same_fp(rng: &mut Rng) -> FpEncoded {
     let ops = [
         0x1au32, 0x3a, 0x5b, 0x5f, 0x1e, 0x3e, 0x18, 0x38, 0x7a, 0x1c, 0x5c, 0x7c, // base
         0x19, 0x39, 0x1b, 0x1f, 0x3f, 0x5d, 0x7d, // FMLA/FMLS/FMULX/FRECPS/FRSQRTS/FACGE/FACGT
@@ -505,14 +224,14 @@ fn three_same_fp(rng: &mut Rng) -> FpEncoded {
 /// Size rule for a two-reg-misc op.
 #[derive(Clone, Copy)]
 enum SzRule {
-    Le2,   // size in 0..=2
-    Eq0,   // size == 0
-    Le1,   // size in 0..=1
-    Eq1,   // size == 1
-    Not3,  // size in 0..=3, but 3 requires Q=1
+    Le2,  // size in 0..=2
+    Eq0,  // size == 0
+    Le1,  // size in 0..=1
+    Eq1,  // size == 1
+    Not3, // size in 0..=3, but 3 requires Q=1
 }
 
-fn two_reg_misc(rng: &mut Rng) -> FpEncoded {
+pub(super) fn two_reg_misc(rng: &mut Rng) -> FpEncoded {
     use SzRule::*;
     let q = rng.below(2);
     // (u, opcode, size rule).
@@ -581,9 +300,7 @@ fn pick_size(rng: &mut Rng, rule: SzRule, q: u32) -> u32 {
     }
 }
 
-fn two_reg_misc_fp(rng: &mut Rng) -> FpEncoded {
-    // (u, opcode-low-5) pairs; size[1] folds into the high opcode bit, size[0]
-    // selects single/double. We build the raw `size`/`u`/`opcode` fields here.
+pub(super) fn two_reg_misc_fp(rng: &mut Rng) -> FpEncoded {
     // (u, opcode5, a) where the 7-bit op = opcode5 | a<<5 | u<<6.
     let variants: &[(u32, u32, u32)] = &[
         (0, 0b01111, 1), // FABS (0x2f)
@@ -634,7 +351,7 @@ fn two_reg_misc_fp(rng: &mut Rng) -> FpEncoded {
     FpEncoded { word, init_v: random_v(rng), gpr_seeds: vec![], fpcr: FPCR_DN }
 }
 
-fn mod_imm(rng: &mut Rng) -> FpEncoded {
+pub(super) fn mod_imm(rng: &mut Rng) -> FpEncoded {
     let mut q = rng.below(2);
     let op = rng.below(2);
     // cmode 0..15; cmode 1111 is FMOV-vector (op=1 needs Q=1; op=1 Q=0 = FP16).
@@ -654,7 +371,7 @@ fn mod_imm(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn dup_general(rng: &mut Rng) -> FpEncoded {
+pub(super) fn dup_general(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     // imm5 low set bit picks the size: B=1,H=2,S=4,D=8; D needs Q=1.
     let sizes: &[u32] = if q == 1 { &[1, 2, 4, 8] } else { &[1, 2, 4] };
@@ -675,7 +392,7 @@ fn dup_general(rng: &mut Rng) -> FpEncoded {
     }
 }
 
-fn indexed(rng: &mut Rng) -> FpEncoded {
+pub(super) fn indexed(rng: &mut Rng) -> FpEncoded {
     // (u, opcode, is_fp).
     let ops: &[(u32, u32, bool)] = &[
         (0, 0b1000, false), // MUL
@@ -742,7 +459,7 @@ fn indexed(rng: &mut Rng) -> FpEncoded {
     FpEncoded { word, init_v: random_v(rng), gpr_seeds: vec![], fpcr: if is_fp { FPCR_DN } else { 0 } }
 }
 
-fn three_diff(rng: &mut Rng) -> FpEncoded {
+pub(super) fn three_diff(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     // opcode (bits 15:12) with its (u, size) constraints.
     let opcode = match rng.below(15) {
@@ -766,12 +483,12 @@ fn three_diff(rng: &mut Rng) -> FpEncoded {
     enc(word, rng)
 }
 
-fn three_same(rng: &mut Rng) -> FpEncoded {
+pub(super) fn three_same(rng: &mut Rng) -> FpEncoded {
     let q = rng.below(2);
     let opcode = rng.below(0b11000); // 0x00..0x17
     let size_q = |rng: &mut Rng| if q == 1 { rng.below(4) } else { rng.below(3) };
     let (u, size) = match opcode {
-        0b10111 => (0, size_q(rng)),               // ADDP (U=0)
+        0b10111 => (0, size_q(rng)),                 // ADDP (U=0)
         0b10110 => (rng.below(2), 1 + rng.below(2)), // SQDMULH/SQRDMULH: size 1,2
         0b10011 => {
             let u = rng.below(2);

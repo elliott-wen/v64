@@ -45,3 +45,33 @@ pub fn run(cpu: &mut CpuState, mem: &mut Memory, until: u64, count: usize) -> St
         executed += 1;
     }
 }
+
+/// Outcome of a single interpreted instruction step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Executed one instruction; `cpu.pc` now holds the next PC (also returned).
+    Next(u64),
+    /// Hit an unimplemented instruction. `cpu.pc` is left at the faulting PC and
+    /// no architectural state was changed.
+    Unsupported { pc: u64, word: u32 },
+}
+
+/// Execute exactly one instruction at `cpu.pc`, updating `cpu`/`mem` and
+/// advancing `cpu.pc`.
+///
+/// This is the single-step primitive the JIT's `interpret_one` escape hatch is
+/// built on. It mirrors one iteration of [`run`]'s loop body; `run` is left
+/// deliberately independent of it so it stays the untouched reference loop.
+pub fn step(cpu: &mut CpuState, mem: &mut Memory) -> Step {
+    let pc = cpu.pc;
+    let word = mem.read_u32(crate::mmu::translate(cpu, mem, pc));
+    let insn = decode(word);
+    if let Insn::Unsupported { word } = insn {
+        return Step::Unsupported { pc, word };
+    }
+    cpu.pc = match execute(cpu, mem, insn, pc) {
+        Some(target) => target,
+        None => pc.wrapping_add(4),
+    };
+    Step::Next(cpu.pc)
+}

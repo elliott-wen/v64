@@ -12,6 +12,12 @@ path = "src/lib.rs"
 aarch64-cpu-state.workspace = true
 aarch64-interp.workspace = true
 
+# The JIT backend, used as a third differential runner (`run_jit`). Opt-in
+# because it pulls in wasmtime: `cargo test -p aarch64-difftest --features jit`.
+[dependencies.aarch64-jit]
+path = "../jit"
+optional = true
+
 # Unicorn is the differential oracle. It builds QEMU via cmake, which is heavy,
 # so it is opt-in: `cargo test -p aarch64-difftest --features unicorn`.
 [dependencies.unicorn-engine]
@@ -22,4 +28,5 @@ features = ["arch_aarch64"]     # only what the oracle needs
 
 [features]
 default = []
+jit = ["dep:aarch64-jit"]
 unicorn = ["dep:unicorn-engine"]

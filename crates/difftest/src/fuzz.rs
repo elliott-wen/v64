@@ -27,6 +27,11 @@ use crate::{
     StopReason,
 };
 
+#[cfg(feature = "jit")]
+use crate::{jit_run::run_on, MAP_BASE, MEM_SIZE};
+#[cfg(feature = "jit")]
+use aarch64_jit::Vm;
+
 /// Outcome of fuzzing one class.
 #[derive(Debug, Clone)]
 pub struct FuzzReport {
@@ -213,4 +218,112 @@ pub fn fuzz_mem_class(class: &MemClass, iters: u32, seed: u64) -> Result<FuzzRep
     }
 
     Ok(FuzzReport { class: class.name.to_string(), iters, compared, reserved, faulted })
+}
+
+// ---------------------------------------------------------------------------
+// JIT-vs-interpreter sweep (`jit` feature)
+//
+// The interpreter is the trusted reference here (it is itself fuzzed against
+// Unicorn). Each prepared vector runs on both the interpreter and the JIT; any
+// divergence in architectural state, touched memory, or stop reason fails. One
+// VM is reused across iterations to amortize wasmtime engine setup.
+// ---------------------------------------------------------------------------
+
+/// Recreate the reused VM this often. A wasmtime `Store` caps live instances at
+/// 10_000 and the dispatcher compiles a fresh instance per (distinct) block, so
+/// a long sweep must periodically drop the store. The interval amortizes engine
+/// setup while staying well under the cap.
+#[cfg(feature = "jit")]
+const VM_REFRESH: u32 = 4096;
+
+/// Compare one prepared vector on the interpreter and the JIT.
+#[cfg(feature = "jit")]
+fn jit_step(vm: &mut Vm, tv: &TestVector, here: &dyn Fn() -> String) -> Result<(), String> {
+    let (ours, ours_stop) = crate::ours::run_ours(tv);
+    let (jit, jit_stop) = run_on(vm, tv);
+    if let Some(diff) = ours.diff(&jit) {
+        return Err(format!("{}: {diff}\n ours: {ours:?}\n jit:  {jit:?}", here()));
+    }
+    if ours_stop != jit_stop {
+        return Err(format!("{}: stop reason ours={ours_stop:?} jit={jit_stop:?}", here()));
+    }
+    Ok(())
+}
+
+/// Fuzz one simple class: JIT vs interpreter. Returns the number compared.
+#[cfg(feature = "jit")]
+pub fn jit_fuzz_class(class: &Class, iters: u32, seed: u64) -> Result<u32, String> {
+    let mut rng = Rng::new(seed);
+    let mut vm = Vm::new(MAP_BASE, MEM_SIZE);
+    for i in 0..iters {
+        if i != 0 && i % VM_REFRESH == 0 {
+            vm = Vm::new(MAP_BASE, MEM_SIZE);
+        }
+        let word = (class.encode)(&mut rng);
+        let mut tv = random_state(&mut rng);
+        tv.code = word.to_le_bytes().to_vec();
+        let here = || format!("class `{}` iter {i} word {word:#010x} (seed {seed:#x})", class.name);
+        jit_step(&mut vm, &tv, &here)?;
+    }
+    Ok(iters)
+}
+
+/// Fuzz one FP/SIMD class: JIT vs interpreter (the JIT routes these through the
+/// interpreter escape hatch until SIMD/FP lowering lands, so this also guards
+/// that fallback path).
+#[cfg(feature = "jit")]
+pub fn jit_fuzz_fp_class(class: &FpClass, iters: u32, seed: u64) -> Result<u32, String> {
+    let mut rng = Rng::new(seed);
+    let mut vm = Vm::new(MAP_BASE, MEM_SIZE);
+    for i in 0..iters {
+        if i != 0 && i % VM_REFRESH == 0 {
+            vm = Vm::new(MAP_BASE, MEM_SIZE);
+        }
+        let enc = (class.encode)(&mut rng);
+        let word = enc.word;
+        let mut tv = random_state(&mut rng);
+        tv.code = word.to_le_bytes().to_vec();
+        tv.init_v = Some(enc.init_v);
+        tv.init_fpcr = enc.fpcr;
+        for (reg, val) in &enc.gpr_seeds {
+            tv.init_x[*reg as usize] = *val;
+        }
+        let here = || format!("class `{}` iter {i} word {word:#010x} (seed {seed:#x})", class.name);
+        jit_step(&mut vm, &tv, &here)?;
+    }
+    Ok(iters)
+}
+
+/// Fuzz one memory class: JIT vs interpreter.
+#[cfg(feature = "jit")]
+pub fn jit_fuzz_mem_class(class: &MemClass, iters: u32, seed: u64) -> Result<u32, String> {
+    let mut rng = Rng::new(seed);
+    let mut vm = Vm::new(MAP_BASE, MEM_SIZE);
+    for i in 0..iters {
+        if i != 0 && i % VM_REFRESH == 0 {
+            vm = Vm::new(MAP_BASE, MEM_SIZE);
+        }
+        let enc = (class.encode)(&mut rng);
+        let word = enc.word;
+        let mut tv = random_state(&mut rng);
+        tv.code = word.to_le_bytes().to_vec();
+        for (reg, val) in &enc.seeds {
+            if *reg == 31 {
+                tv.init_sp = *val;
+            } else {
+                tv.init_x[*reg as usize] = *val;
+            }
+        }
+        tv.init_data = Some(enc.data);
+        if !enc.init_v.is_empty() {
+            let mut v = [0u128; 32];
+            for (reg, val) in &enc.init_v {
+                v[*reg as usize] = *val;
+            }
+            tv.init_v = Some(v);
+        }
+        let here = || format!("class `{}` iter {i} word {word:#010x} (seed {seed:#x})", class.name);
+        jit_step(&mut vm, &tv, &here)?;
+    }
+    Ok(iters)
 }
