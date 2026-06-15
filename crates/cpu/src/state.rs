@@ -40,6 +40,9 @@ pub struct CpuState {
     /// Banked stack pointers SP_EL0..SP_EL3. The *active* one mirrors `sp`; the
     /// others hold the saved value. See [`Self::set_el_spsel`].
     pub sp_el: [u64; 4],
+    /// Set by a PSCI `SYSTEM_OFF`/`SYSTEM_RESET` call; the machine loop stops
+    /// when it sees this. Not an architectural register — a host-side halt flag.
+    pub powered_off: bool,
 }
 
 impl Default for CpuState {
@@ -57,6 +60,7 @@ impl Default for CpuState {
             spsel: true,
             daif: 0,
             sp_el: [0; 4],
+            powered_off: false,
         }
     }
 }

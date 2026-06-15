@@ -40,6 +40,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aarch64-platform"
+version = "0.1.0"
+dependencies = [
+ "aarch64-cpu-state",
+ "aarch64-decoder",
+ "aarch64-interp",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

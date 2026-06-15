@@ -6,7 +6,7 @@ use crate::mem_access::{read, write};
 use crate::memory::GuestMem;
 
 /// LDXR/LDAXR: load and arm the exclusive monitor with `(addr, value)`.
-pub(crate) fn load(cpu: &mut CpuState, mem: &dyn GuestMem, size: u8, rt: u8, rn: u8) -> Option<u64> {
+pub(crate) fn load(cpu: &mut CpuState, mem: &mut dyn GuestMem, size: u8, rt: u8, rn: u8) -> Option<u64> {
     let addr = cpu.read_gpr(rn, true);
     let val = read(cpu, mem, addr, size);
     cpu.excl = Some((addr, val));

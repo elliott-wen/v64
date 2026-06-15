@@ -1,0 +1,12 @@
+[package]
+name = "aarch64-platform"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+aarch64-cpu-state.workspace = true
+aarch64-interp.workspace = true
+
+[dev-dependencies]
+aarch64-decoder.workspace = true

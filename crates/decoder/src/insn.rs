@@ -247,6 +247,12 @@ pub enum Insn {
     /// SVC #imm — supervisor call (exception to EL1).
     Svc { imm16: u16 },
 
+    /// HVC #imm — hypervisor call. Used as the PSCI conduit (`method = "hvc"`).
+    Hvc { imm16: u16 },
+
+    /// SMC #imm — secure monitor call. Alternate PSCI conduit (`method = "smc"`).
+    Smc { imm16: u16 },
+
     /// ERET — exception return.
     Eret,
 

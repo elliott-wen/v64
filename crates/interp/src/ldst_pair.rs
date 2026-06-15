@@ -45,10 +45,8 @@ pub(crate) fn exec(
     let esize = if width8 { 8 } else { 4 };
 
     if is_load {
-        let (v1, v2) = (
-            load_elem(cpu, mem, ea, width8, signed),
-            load_elem(cpu, mem, ea + esize, width8, signed),
-        );
+        let v1 = load_elem(cpu, mem, ea, width8, signed);
+        let v2 = load_elem(cpu, mem, ea + esize, width8, signed);
         // LDPSW and the 64-bit form write X; the 32-bit form writes W.
         if width8 || signed {
             cpu.write_gpr(rt, false, v1);
@@ -69,7 +67,7 @@ pub(crate) fn exec(
     None
 }
 
-fn load_elem(cpu: &CpuState, mem: &dyn GuestMem, addr: u64, width8: bool, signed: bool) -> u64 {
+fn load_elem(cpu: &CpuState, mem: &mut dyn GuestMem, addr: u64, width8: bool, signed: bool) -> u64 {
     let size = if width8 { 3 } else { 2 };
     let raw = mem_access::read(cpu, mem, addr, size);
     if signed {

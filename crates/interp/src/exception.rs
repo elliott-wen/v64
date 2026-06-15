@@ -32,13 +32,19 @@ pub(crate) fn key_sp_el1() -> u32 {
     sysreg_key(3, 4, 4, 1, 0)
 }
 
-/// Take a synchronous exception to EL1: bank SP, save ELR/SPSR/ESR, mask
-/// interrupts, and vector through VBAR_EL1. Returns the new PC.
-fn take_exception(cpu: &mut CpuState, ec: u32, iss: u32, return_addr: u64) -> u64 {
+/// Vector-table *type* offsets within a source group: synchronous = 0x000,
+/// IRQ = 0x080, FIQ = 0x100, SError = 0x180 (ARM ARM, "Exception vectors").
+const VEC_SYNC: u64 = 0x000;
+const VEC_IRQ: u64 = 0x080;
+
+/// Common exception-entry sequence to EL1: pick the vector slot, save
+/// ELR/SPSR, switch to EL1h, mask interrupts, and return the new PC. `vec_type`
+/// is the within-group type offset (`VEC_SYNC`/`VEC_IRQ`).
+fn enter_el1(cpu: &mut CpuState, return_addr: u64, vec_type: u64) -> u64 {
     let target_el = 1u8;
-    // Vector offset by source: lower EL (AArch64) = 0x400; same EL = 0x200
-    // (SP_ELx) or 0x000 (SP_EL0). All synchronous (type offset 0).
-    let offset = if cpu.el < target_el {
+    // Source group: lower EL (AArch64) = 0x400; same EL = 0x200 (SP_ELx) or
+    // 0x000 (SP_EL0). The type offset selects sync/IRQ/FIQ/SError within it.
+    let group = if cpu.el < target_el {
         0x400
     } else if cpu.spsel {
         0x200
@@ -50,12 +56,27 @@ fn take_exception(cpu: &mut CpuState, ec: u32, iss: u32, return_addr: u64) -> u6
 
     cpu.sysregs.insert(key_elr_el1(), return_addr);
     cpu.sysregs.insert(key_spsr_el1(), spsr);
-    cpu.sysregs
-        .insert(key_esr_el1(), (u64::from(ec) << 26) | (1 << 25) | u64::from(iss));
 
     cpu.set_el_spsel(target_el, true); // EL1h
     cpu.daif = 0b1111; // mask D, A, I, F
-    vbar.wrapping_add(offset)
+    vbar.wrapping_add(group + vec_type)
+}
+
+/// Take a synchronous exception to EL1, also recording ESR_EL1. Returns the new
+/// PC.
+fn take_exception(cpu: &mut CpuState, ec: u32, iss: u32, return_addr: u64) -> u64 {
+    let pc = enter_el1(cpu, return_addr, VEC_SYNC);
+    cpu.sysregs
+        .insert(key_esr_el1(), (u64::from(ec) << 26) | (1 << 25) | u64::from(iss));
+    pc
+}
+
+/// Take an asynchronous IRQ to EL1. Called by the machine loop *before*
+/// executing the instruction at `cpu.pc`, so the saved ELR is `cpu.pc` itself
+/// (execution resumes there on ERET). ESR is UNKNOWN for IRQ, so it is left
+/// untouched. Returns the IRQ vector PC.
+pub fn take_irq(cpu: &mut CpuState) -> u64 {
+    enter_el1(cpu, cpu.pc, VEC_IRQ)
 }
 
 /// SVC #imm — exception to EL1. `pc` is the SVC's own address.

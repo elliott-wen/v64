@@ -6,12 +6,16 @@
 //! buffer (a flat slice couldn't).
 
 /// Sized little-endian guest memory access. Addresses are *guest* addresses.
+///
+/// Reads take `&mut self` because an MMIO backing can mutate on read — e.g. a
+/// UART data register pops its RX FIFO, and `GICC_IAR` acknowledges the active
+/// interrupt. Flat RAM (`Memory`/`MemView`) ignores the mutability.
 pub trait GuestMem {
     fn base(&self) -> u64;
-    fn read_u8(&self, addr: u64) -> u8;
-    fn read_u16(&self, addr: u64) -> u16;
-    fn read_u32(&self, addr: u64) -> u32;
-    fn read_u64(&self, addr: u64) -> u64;
+    fn read_u8(&mut self, addr: u64) -> u8;
+    fn read_u16(&mut self, addr: u64) -> u16;
+    fn read_u32(&mut self, addr: u64) -> u32;
+    fn read_u64(&mut self, addr: u64) -> u64;
     fn write_u8(&mut self, addr: u64, val: u8);
     fn write_u16(&mut self, addr: u64, val: u16);
     fn write_u32(&mut self, addr: u64, val: u32);
@@ -54,18 +58,18 @@ macro_rules! impl_guest_mem {
             fn base(&self) -> u64 {
                 self.base
             }
-            fn read_u8(&self, addr: u64) -> u8 {
+            fn read_u8(&mut self, addr: u64) -> u8 {
                 self.bytes[(addr - self.base) as usize]
             }
-            fn read_u16(&self, addr: u64) -> u16 {
+            fn read_u16(&mut self, addr: u64) -> u16 {
                 let o = (addr - self.base) as usize;
                 u16::from_le_bytes(self.bytes[o..o + 2].try_into().unwrap())
             }
-            fn read_u32(&self, addr: u64) -> u32 {
+            fn read_u32(&mut self, addr: u64) -> u32 {
                 let o = (addr - self.base) as usize;
                 u32::from_le_bytes(self.bytes[o..o + 4].try_into().unwrap())
             }
-            fn read_u64(&self, addr: u64) -> u64 {
+            fn read_u64(&mut self, addr: u64) -> u64 {
                 let o = (addr - self.base) as usize;
                 u64::from_le_bytes(self.bytes[o..o + 8].try_into().unwrap())
             }

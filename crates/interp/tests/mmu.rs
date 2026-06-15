@@ -17,9 +17,9 @@ fn enable_mmu(cpu: &mut CpuState, l0_base: u64) {
 
 #[test]
 fn mmu_off_is_identity() {
-    let mem = Memory::new(0, 0x1000);
+    let mut mem = Memory::new(0, 0x1000);
     let cpu = CpuState::new();
-    assert_eq!(translate(&cpu, &mem, 0xdead_beef), 0xdead_beef);
+    assert_eq!(translate(&cpu, &mut mem, 0xdead_beef), 0xdead_beef);
 }
 
 #[test]
@@ -34,8 +34,8 @@ fn walk_4level_4k_page() {
     let mut cpu = CpuState::new();
     enable_mmu(&mut cpu, 0x1000);
 
-    assert_eq!(translate(&cpu, &mem, 0x000), 0x5000);
-    assert_eq!(translate(&cpu, &mem, 0x123), 0x5123, "page offset preserved");
+    assert_eq!(translate(&cpu, &mut mem, 0x000), 0x5000);
+    assert_eq!(translate(&cpu, &mut mem, 0x123), 0x5123, "page offset preserved");
 }
 
 #[test]
@@ -50,5 +50,5 @@ fn walk_2mb_block_at_l2() {
     enable_mmu(&mut cpu, 0x1000);
 
     // VA offset within the 2 MiB block is carried into the PA.
-    assert_eq!(translate(&cpu, &mem, 0x1234), 0x4000_1234);
+    assert_eq!(translate(&cpu, &mut mem, 0x1234), 0x4000_1234);
 }

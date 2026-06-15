@@ -15,6 +15,8 @@ pub enum StopReason {
     CountReached,
     /// Hit an instruction the interpreter does not implement yet.
     Unsupported { pc: u64, word: u32 },
+    /// The guest requested power-off/reset via PSCI (`CpuState::powered_off`).
+    PoweredOff,
 }
 
 /// Run from `cpu.pc` until reaching `until`, or after `count` instructions
@@ -32,7 +34,8 @@ pub fn run(cpu: &mut CpuState, mem: &mut dyn GuestMem, until: u64, count: usize)
         }
 
         let pc = cpu.pc;
-        let word = mem.read_u32(crate::mmu::translate(cpu, mem, pc));
+        let fetch_pa = crate::mmu::translate(cpu, mem, pc);
+        let word = mem.read_u32(fetch_pa);
         let insn = decode(word);
         if let Insn::Unsupported { word } = insn {
             return StopReason::Unsupported { pc, word };
@@ -64,7 +67,8 @@ pub enum Step {
 /// deliberately independent of it so it stays the untouched reference loop.
 pub fn step(cpu: &mut CpuState, mem: &mut dyn GuestMem) -> Step {
     let pc = cpu.pc;
-    let word = mem.read_u32(crate::mmu::translate(cpu, mem, pc));
+    let fetch_pa = crate::mmu::translate(cpu, mem, pc);
+    let word = mem.read_u32(fetch_pa);
     let insn = decode(word);
     if let Insn::Unsupported { word } = insn {
         return Step::Unsupported { pc, word };

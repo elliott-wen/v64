@@ -33,12 +33,18 @@ pub(crate) fn decode(word: u32) -> Insn {
     if field(word, 22, 10) == 0b1101010100 {
         return system::decode(word);
     }
-    // Exception generating: bits [31:24] == 1101_0100. SVC = opc 000, LL 01.
+    // Exception generating: bits [31:24] == 1101_0100. opc = [23:21], LL = [1:0].
     if field(word, 24, 8) == 0b1101_0100 {
-        if field(word, 21, 3) == 0 && field(word, 0, 2) == 0b01 {
-            return Insn::Svc { imm16: field(word, 5, 16) as u16 };
+        let imm16 = field(word, 5, 16) as u16;
+        if field(word, 21, 3) == 0 {
+            match field(word, 0, 2) {
+                0b01 => return Insn::Svc { imm16 }, // SVC -> EL1
+                0b10 => return Insn::Hvc { imm16 }, // HVC -> PSCI conduit
+                0b11 => return Insn::Smc { imm16 }, // SMC -> PSCI conduit
+                _ => {}
+            }
         }
-        return Insn::Unsupported { word }; // HVC/SMC/BRK/HLT not implemented
+        return Insn::Unsupported { word }; // BRK/HLT/DCPS not implemented
     }
     Insn::Unsupported { word }
 }

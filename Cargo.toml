@@ -4,6 +4,7 @@ members = [
     "crates/cpu",
     "crates/decoder",
     "crates/interp",
+    "crates/platform",
     "crates/difftest",
     "crates/jit",
 ]
@@ -17,3 +18,4 @@ license = "MIT OR Apache-2.0"
 aarch64-cpu-state = { path = "crates/cpu" }
 aarch64-decoder = { path = "crates/decoder" }
 aarch64-interp = { path = "crates/interp" }
+aarch64-platform = { path = "crates/platform" }

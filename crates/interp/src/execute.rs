@@ -12,7 +12,7 @@ use crate::{
     add_sub_carry, add_sub_ext_reg, add_sub_imm, add_sub_shifted_reg, bitfield, branch_imm,
     branch_reg, compare_branch, cond_branch, cond_compare, cond_select, data_proc_1src,
     data_proc_2src, data_proc_3src, exception, extract, fp, ldst, ldst_atomic, ldst_cas, ldst_excl,
-    ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, simd_aes, simd_across, simd_copy,
+    ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, psci, simd_aes, simd_across, simd_copy,
     simd_dup,
     simd_ext, simd_indexed, simd_ldst_struct, simd_sha, simd_tbl,
     simd_mod_imm, simd_permute, simd_scalar, simd_shift_imm, simd_three_diff, simd_three_same,
@@ -177,6 +177,11 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc
         Insn::SysRegMove { read, key, rt } => system::exec(cpu, read, key, rt),
         Insn::MsrImm { op1, op2, crm } => exception::msr_imm(cpu, op1, op2, crm),
         Insn::Svc { imm16 } => exception::svc(cpu, imm16, pc),
+        // HVC/SMC are the PSCI conduit: handle the call and resume sequentially.
+        Insn::Hvc { .. } | Insn::Smc { .. } => {
+            psci::call(cpu);
+            None
+        }
         Insn::Eret => exception::eret(cpu),
         Insn::Nop => None,
         Insn::Unsupported { .. } => unreachable!("filtered in run()"),

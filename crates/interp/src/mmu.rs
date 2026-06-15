@@ -27,7 +27,7 @@ fn mmu_enabled(cpu: &CpuState) -> bool {
 
 /// Translate a virtual address to physical. Identity when the MMU is off.
 #[must_use]
-pub fn translate(cpu: &CpuState, mem: &dyn GuestMem, va: u64) -> u64 {
+pub fn translate(cpu: &CpuState, mem: &mut dyn GuestMem, va: u64) -> u64 {
     if !mmu_enabled(cpu) {
         return va;
     }
@@ -41,7 +41,7 @@ pub fn translate(cpu: &CpuState, mem: &dyn GuestMem, va: u64) -> u64 {
 }
 
 /// Walk the 4KB-granule tables from `table_base` (a physical address).
-fn walk(mem: &dyn GuestMem, mut table_base: u64, va: u64, tsz: u32) -> u64 {
+fn walk(mem: &mut dyn GuestMem, mut table_base: u64, va: u64, tsz: u32) -> u64 {
     let mut level = starting_level(tsz);
     loop {
         let shift = 39 - level * 9; // L0=39, L1=30, L2=21, L3=12
