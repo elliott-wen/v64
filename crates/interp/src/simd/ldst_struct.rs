@@ -26,9 +26,9 @@ fn get_elem(cpu: &CpuState, tt: u8, byte_off: u32, size: u8) -> u64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn multi(
+pub(crate) fn multi<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     is_load: bool,
     q: bool,
     postidx: bool,
@@ -81,9 +81,9 @@ pub(crate) fn multi(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn single(
+pub(crate) fn single<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     is_load: bool,
     replicate: bool,
     postidx: bool,

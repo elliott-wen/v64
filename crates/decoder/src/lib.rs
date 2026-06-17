@@ -13,6 +13,7 @@
 
 mod bitmask;
 mod bits;
+mod block;
 mod insn;
 
 // Encoding-group routers.
@@ -51,6 +52,7 @@ mod system;
 mod test_branch;
 
 pub use bitmask::decode_bit_masks;
+pub use block::{form_block, form_block_bounded, is_terminator, Block};
 pub use insn::{AddrMode, Insn, PairIndex, ShiftType};
 pub use system::sysreg_key;
 

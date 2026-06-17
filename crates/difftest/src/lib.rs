@@ -11,8 +11,6 @@
 //! ```
 
 mod fuzz;
-#[cfg(feature = "jit")]
-mod jit_run;
 pub mod mmu_test;
 mod ours;
 mod rng;
@@ -36,11 +34,6 @@ pub use ours::run_ours;
 pub use rng::Rng;
 pub use snapshot::StateSnapshot;
 pub use vector::TestVector;
-
-#[cfg(feature = "jit")]
-pub use fuzz::{jit_fuzz_class, jit_fuzz_fp_class, jit_fuzz_mem_class};
-#[cfg(feature = "jit")]
-pub use jit_run::run_jit;
 
 #[cfg(feature = "unicorn")]
 mod oracle;

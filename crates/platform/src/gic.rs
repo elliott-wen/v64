@@ -145,21 +145,29 @@ impl Gic {
         Gic(Rc::new(RefCell::new(GicInner::new())))
     }
 
-    /// Assert interrupt `id` (a peripheral raising its line).
+    /// Assert interrupt `id` (a peripheral raising its line). Only the rising
+    /// edge does work: re-asserting an already-pending line skips the (O(1024))
+    /// rescan, which matters because the timer re-drives its PPI every sample.
     pub fn set_pending(&self, id: u32) {
         if (id as usize) < NUM_IRQS {
             let mut g = self.0.borrow_mut();
-            g.pending[id as usize] = true;
-            g.recompute();
+            if !g.pending[id as usize] {
+                g.pending[id as usize] = true;
+                g.recompute();
+            }
         }
     }
 
-    /// Deassert a pending interrupt that has not yet been acknowledged.
+    /// Deassert a pending interrupt that has not yet been acknowledged. Like
+    /// [`set_pending`](Self::set_pending), only a real edge triggers a rescan —
+    /// the steady state is the timer clearing an already-clear line every sample.
     pub fn clear_pending(&self, id: u32) {
         if (id as usize) < NUM_IRQS {
             let mut g = self.0.borrow_mut();
-            g.pending[id as usize] = false;
-            g.recompute();
+            if g.pending[id as usize] {
+                g.pending[id as usize] = false;
+                g.recompute();
+            }
         }
     }
 

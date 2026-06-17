@@ -8,12 +8,14 @@
 //! (linear-memory layout, ABI, exit convention) lives in [`abi`].
 
 pub mod abi;
-pub mod block;
-mod dispatch;
+mod eligible;
 pub mod emit;
 mod lower;
 pub mod runtime;
 
-pub use block::{form_block, Block};
+// Block discovery now lives in the decoder crate (shared with the interpreter's
+// platform execution loop); re-export for existing consumers.
+pub use aarch64_decoder::{form_block, Block};
+pub use eligible::{can_inline, form_jit_block};
 pub use emit::{emit_block, BLOCK_FUNC};
 pub use runtime::{BlockExit, Vm};

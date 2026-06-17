@@ -6,9 +6,9 @@ use aarch64_cpu_state::CpuState;
 use crate::mem_access::{align_check, read, write};
 use crate::memory::GuestMem;
 
-pub(crate) fn exec(
+pub(crate) fn exec<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     size: u8,
     op: u8,
     rs: u8,

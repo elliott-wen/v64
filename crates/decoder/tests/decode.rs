@@ -73,9 +73,9 @@ fn dc_zva_decodes() {
 }
 
 #[test]
-fn tlbi_is_nop() {
-    // tlbi vmalle1 => 0xd508871f  (SYS, no architectural effect in our model)
-    assert_eq!(decode(0xd508_871f), Insn::Nop);
+fn tlbi_decodes() {
+    // tlbi vmalle1 => 0xd508871f  (SYS, CRn=8): flushes the interpreter's TLB.
+    assert_eq!(decode(0xd508_871f), Insn::Tlbi);
 }
 
 #[test]

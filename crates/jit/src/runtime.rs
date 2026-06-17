@@ -1,37 +1,29 @@
-//! The JIT runtime: an embedded wasmtime instance whose linear memory is shared
-//! with the host, plus the `interpret_one` host import generated blocks call
-//! into for anything not lowered inline (Milestone 2).
+//! The JIT backend: compile blocks to WASM and run them against the *shared*
+//! guest CPU state and memory the interpreter uses.
 //!
-//! For now [`Vm`] runs a single formed block end to end — enough to exercise the
-//! full block ABI through the interpreter escape hatch. Milestone 5 grows this
-//! into a dispatcher with a block cache; the linear-memory layout and the
-//! `interpret_one` contract established here are what it builds on.
+//! The platform execution loop is the organizer — it owns guest state and
+//! decides which blocks run here. This type is the wasmtime substrate: a linear
+//! memory holding the guest register image, a cache of compiled block instances,
+//! and a `Ctx<M>` in the store that the host helper `interpret_one` reads/writes.
+//!
+//! Shared state (Option A): rather than copy guest RAM into the wasm linear
+//! memory, the organizer **lends** its `CpuState` + memory `M` to the store for
+//! the duration of a block run via a cheap swap (the TLB is boxed and the bus's
+//! buffers are heap-allocated, so swapping the structs only moves pointers). A
+//! block's leading register ops run inline against the register image; its escape
+//! instruction calls [`interpret_one`], which single-steps the interpreter on the
+//! lent `cpu` + `mem` — so memory, system instructions, MMU translation, MMIO,
+//! and faults are all handled exactly as in the pure interpreter.
+
+use std::collections::HashMap;
 
 use aarch64_cpu_state::{regs::offsets, CpuState, GuestRegs};
-use aarch64_interp::MemView;
-use wasmtime::{
-    Caller, Engine, Instance, Linker, MemoryType, Module, Store, Memory as WasmMemory,
-};
+use aarch64_decoder::Block;
+use aarch64_interp::{GuestMem, Step};
+use wasmtime::{Caller, Engine, Instance, Linker, Memory as WasmMemory, MemoryType, Module, Store};
 
 use crate::abi;
-use crate::block::Block;
 use crate::emit::{emit_block, BLOCK_FUNC};
-
-/// Per-instance host state threaded through the wasmtime `Store`.
-///
-/// The hot register file and guest RAM live in the wasmtime linear memory (the
-/// single source of truth). The **cold** CPU state — sysregs, EL, exclusives,
-/// etc. — has no flat layout and lives here, persisted across calls; only its
-/// hot fields are synced to/from the linear-memory image on each step.
-struct Runtime {
-    cpu: CpuState,
-    memory: Option<WasmMemory>,
-    guest_base: u64,
-    ram_bytes: usize,
-    /// Number of `interpret_one` calls (escape-hatch fallbacks) so far. Lets
-    /// callers confirm how much of a block was lowered inline.
-    interp_calls: u64,
-}
 
 /// How a block run finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,181 +34,128 @@ pub struct BlockExit {
     pub exit_reason: u64,
 }
 
-/// An embedded wasmtime instance that runs JIT-compiled guest blocks.
-pub struct Vm {
-    engine: Engine,
-    linker: Linker<Runtime>,
-    store: Store<Runtime>,
-    memory: WasmMemory,
-    guest_base: u64,
+/// Store state: the guest CPU + memory, lent by the organizer for a block run,
+/// plus the linear-memory handle the host helper uses to reach the register
+/// image. `cpu`/`mem` are swapped in before a run and back out after.
+struct Ctx<M: GuestMem + 'static> {
+    cpu: CpuState,
+    mem: M,
+    wmem: Option<WasmMemory>,
 }
 
-impl Vm {
-    /// Create a VM whose guest RAM window starts at guest address `guest_base`
-    /// and is `ram_bytes` long (mapped at [`abi::RAM_BASE`] in linear memory).
-    #[must_use]
-    pub fn new(guest_base: u64, ram_bytes: usize) -> Self {
-        let engine = Engine::default();
-        let mut store = Store::new(
-            &engine,
-            Runtime { cpu: CpuState::new(), memory: None, guest_base, ram_bytes, interp_calls: 0 },
-        );
+/// A wasmtime substrate that compiles and runs guest blocks against shared state.
+pub struct Vm<M: GuestMem + 'static> {
+    engine: Engine,
+    linker: Linker<Ctx<M>>,
+    store: Store<Ctx<M>>,
+    memory: WasmMemory,
+    /// Compiled block instances keyed by an organizer-chosen key (physical addr).
+    blocks: HashMap<u64, Instance>,
+}
 
-        let total = abi::RAM_BASE as usize + ram_bytes;
-        let pages = total.div_ceil(abi::WASM_PAGE) as u32;
-        let memory =
-            WasmMemory::new(&mut store, MemoryType::new(pages, None)).expect("create memory");
-        store.data_mut().memory = Some(memory);
+impl<M: GuestMem + 'static> Vm<M> {
+    /// Create an empty backend. `spare` is a throwaway memory of the same type as
+    /// the organizer's, parked in the store between runs (the real memory is
+    /// swapped in for each run). The linear memory is a single WASM page — enough
+    /// for the register image + control block (below [`abi::RAM_BASE`]); guest RAM
+    /// is *not* mirrored here (it lives in `mem`, reached via `interpret_one`).
+    #[must_use]
+    pub fn new(spare: M) -> Self {
+        let engine = Engine::default();
+        let mut store =
+            Store::new(&engine, Ctx { cpu: CpuState::new(), mem: spare, wmem: None });
+        let memory = WasmMemory::new(&mut store, MemoryType::new(1, None)).expect("create memory");
+        store.data_mut().wmem = Some(memory);
 
         let mut linker = Linker::new(&engine);
         linker.define(&store, "env", "memory", memory).expect("define memory");
-        linker
-            .func_wrap("env", "interpret_one", interpret_one)
-            .expect("define interpret_one");
+        linker.func_wrap("env", "interpret_one", interpret_one::<M>).expect("define interpret_one");
 
-        Vm { engine, linker, store, memory, guest_base }
+        Vm { engine, linker, store, memory, blocks: HashMap::new() }
     }
 
-    /// Write the initial register image into linear memory.
-    pub fn load_regs(&mut self, regs: &GuestRegs) {
-        let bytes = self.memory.data_mut(&mut self.store);
-        write_regs(bytes, abi::REGS_BASE as usize, regs);
-    }
-
-    /// Read the current register image back out of linear memory.
-    #[must_use]
-    pub fn store_regs(&mut self) -> GuestRegs {
-        read_regs(self.memory.data(&self.store), abi::REGS_BASE as usize)
-    }
-
-    /// Write `data` into guest RAM at guest address `addr` (e.g. code or data).
-    pub fn write_ram(&mut self, addr: u64, data: &[u8]) {
-        let off = abi::ram_offset(addr, self.guest_base);
-        self.memory.data_mut(&mut self.store)[off..off + data.len()].copy_from_slice(data);
-    }
-
-    /// Read `len` bytes of guest RAM starting at guest address `addr`.
-    #[must_use]
-    pub fn read_ram(&mut self, addr: u64, len: usize) -> Vec<u8> {
-        let off = abi::ram_offset(addr, self.guest_base);
-        self.memory.data(&self.store)[off..off + len].to_vec()
-    }
-
-    /// Total number of `interpret_one` (escape-hatch) calls so far. Zero means
-    /// every instruction run was lowered inline.
-    #[must_use]
-    pub fn interp_calls(&self) -> u64 {
-        self.store.data().interp_calls
-    }
-
-    /// Compile `block` to WASM and instantiate it against the shared memory and
-    /// the `interpret_one` import. The returned [`Instance`] can be cached and
-    /// re-run with [`call_instance`](Self::call_instance) as long as this `Vm`
-    /// (and its store) lives.
-    pub(crate) fn compile_instance(&mut self, block: &Block) -> Instance {
-        let wasm = emit_block(block, self.guest_base);
+    /// Compile and cache the block at `key` if not already present.
+    pub fn ensure(&mut self, key: u64, block: &Block) {
+        if self.blocks.contains_key(&key) {
+            return;
+        }
+        let wasm = emit_block(block, 0);
         let module = Module::new(&self.engine, &wasm).expect("valid module");
-        self.linker.instantiate(&mut self.store, &module).expect("instantiate")
+        let inst = self.linker.instantiate(&mut self.store, &module).expect("instantiate");
+        self.blocks.insert(key, inst);
     }
 
-    /// Run a compiled block instance and report where it exited.
-    pub(crate) fn call_instance(&mut self, instance: Instance) -> BlockExit {
-        // Clear the control block; interpret_one re-stamps it on each step.
-        write_u64(self.memory.data_mut(&mut self.store), abi::EXIT_REASON as usize, abi::EXIT_NONE);
+    /// Run the compiled block at `key` against the organizer's `cpu` + `mem`,
+    /// which are lent to the store for the call and restored after. Returns the
+    /// next PC and exit reason. Precondition: [`ensure`](Self::ensure) was called.
+    pub fn run(&mut self, key: u64, cpu: &mut CpuState, mem: &mut M) -> BlockExit {
+        let inst = self.blocks[&key];
 
-        let func = instance
+        // Lend the real CPU + memory to the store (cheap pointer-swapping move).
+        std::mem::swap(cpu, &mut self.store.data_mut().cpu);
+        std::mem::swap(mem, &mut self.store.data_mut().mem);
+
+        // Hot registers -> image; clear the exit control word.
+        let regs = self.store.data().cpu.to_guest_regs();
+        let bytes = self.memory.data_mut(&mut self.store);
+        write_regs(bytes, abi::REGS_BASE as usize, &regs);
+        write_u64(bytes, abi::EXIT_REASON as usize, abi::EXIT_NONE);
+
+        let func = inst
             .get_typed_func::<i32, i64>(&mut self.store, BLOCK_FUNC)
             .expect("block export");
+        let next =
+            func.call(&mut self.store, abi::REGS_BASE as i32).expect("block call") as u64;
 
-        match func.call(&mut self.store, abi::REGS_BASE as i32) {
-            Ok(next) => {
-                // The returned PC is authoritative; write it into the image so
-                // an inline terminator (which leaves the PC on the stack but
-                // doesn't touch the image) and a helper exit agree. Then read
-                // the exit reason the last step stamped into the control block.
-                let bytes = self.memory.data_mut(&mut self.store);
-                write_u64(bytes, abi::REGS_BASE as usize + offsets::PC, next as u64);
-                let reason = read_u64(bytes, abi::EXIT_REASON as usize);
-                BlockExit { next_pc: next as u64, exit_reason: reason }
-            }
-            Err(_trap) => {
-                // A WASM trap (e.g. an out-of-bounds inline memory access) aborts
-                // the block. Surface it as a guest fault at the instruction that
-                // was executing — whose PC is still in the image, since lowerings
-                // advance the image PC only after the access completes — rather
-                // than letting it propagate as a host panic.
-                let bytes = self.memory.data_mut(&mut self.store);
-                let pc = read_u64(bytes, abi::REGS_BASE as usize + offsets::PC);
-                write_u64(bytes, abi::EXIT_REASON as usize, abi::EXIT_FAULT);
-                BlockExit { next_pc: pc, exit_reason: abi::EXIT_FAULT }
-            }
-        }
+        // Image -> hot registers (capture inline updates), set PC, read exit.
+        let img = read_regs(self.memory.data(&self.store), abi::REGS_BASE as usize);
+        let ctx = self.store.data_mut();
+        ctx.cpu.load_guest_regs(&img);
+        ctx.cpu.pc = next;
+        let reason = read_u64(self.memory.data(&self.store), abi::EXIT_REASON as usize);
+
+        // Take the CPU + memory back out of the store.
+        std::mem::swap(cpu, &mut self.store.data_mut().cpu);
+        std::mem::swap(mem, &mut self.store.data_mut().mem);
+
+        BlockExit { next_pc: next, exit_reason: reason }
     }
 
-    /// Compile, run, and discard a single block. Convenience for tests; the
-    /// dispatcher ([`Vm::run`]) caches instances instead.
-    pub fn run_block(&mut self, block: &Block) -> BlockExit {
-        let instance = self.compile_instance(block);
-        self.call_instance(instance)
-    }
-
-    /// Current guest PC from the register image.
-    pub(crate) fn image_pc(&self) -> u64 {
-        read_u64(self.memory.data(&self.store), abi::REGS_BASE as usize + offsets::PC)
-    }
-
-    /// Read the 32-bit guest instruction word at guest address `addr`.
-    pub(crate) fn read_code_word(&self, addr: u64) -> u32 {
-        let off = abi::ram_offset(addr, self.guest_base);
-        let b = self.memory.data(&self.store);
-        u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
+    /// Drop all compiled blocks — call when guest code may have changed
+    /// (self-modifying code / I-cache maintenance).
+    pub fn invalidate(&mut self) {
+        self.blocks.clear();
     }
 }
 
-/// The `interpret_one(regs_base) -> i64` host import: step exactly one guest
-/// instruction at the current PC through the interpreter, against the shared
-/// linear memory, and return the next guest PC.
-///
-/// This is the long-tail escape hatch — generated code calls it for anything not
-/// lowered inline. The interpreter runs **directly on the shared linear memory**
-/// (via `interp::MemView`): no copy. The register image and control block live
-/// in the head region below `RAM_BASE`; the guest RAM window lives at/above it,
-/// so `split_at_mut` hands the two to the register sync and the interpreter as
-/// disjoint borrows. Inline lowerings (see `lower/`) bypass this path entirely.
-fn interpret_one(mut caller: Caller<'_, Runtime>, regs_base: i32) -> i64 {
-    let wmem = caller.data().memory.expect("memory set");
-    let (bytes, rt) = wmem.data_and_store_mut(&mut caller);
-    rt.interp_calls += 1;
+/// The `interpret_one(regs_base) -> i64` host import: single-step the interpreter
+/// on the lent `cpu` + `mem` (so MMU/MMIO/faults are handled), syncing the hot
+/// register image around the step. Returns the next guest PC; stamps the exit
+/// control word on an unsupported instruction.
+fn interpret_one<M: GuestMem + 'static>(mut caller: Caller<'_, Ctx<M>>, regs_base: i32) -> i64 {
+    let wmem = caller.data().wmem.expect("memory set");
+    let (bytes, ctx) = wmem.data_and_store_mut(&mut caller);
     let base = regs_base as usize;
 
-    // head = [0, RAM_BASE): register image + control block.
-    // ram  = guest RAM window the interpreter reads/writes in place.
-    let (head, tail) = bytes.split_at_mut(abi::RAM_BASE as usize);
-    let ram = &mut tail[..rt.ram_bytes];
-
-    // Hot regs: image -> CpuState (cold state in rt.cpu is preserved).
-    rt.cpu.load_guest_regs(&read_regs(head, base));
-
-    let mut view = MemView { base: rt.guest_base, bytes: ram };
-    let outcome = aarch64_interp::step(&mut rt.cpu, &mut view);
-
-    // Hot regs back into the image (RAM writes already landed in linear memory).
-    write_regs(head, base, &rt.cpu.to_guest_regs());
+    // Image -> CPU hot regs (cold state in ctx.cpu is preserved), step, regs back.
+    ctx.cpu.load_guest_regs(&read_regs(bytes, base));
+    let outcome = aarch64_interp::step(&mut ctx.cpu, &mut ctx.mem);
+    write_regs(bytes, base, &ctx.cpu.to_guest_regs());
 
     match outcome {
-        aarch64_interp::Step::Next(next) => {
-            write_u64(head, abi::EXIT_REASON as usize, abi::EXIT_NONE);
+        Step::Next(next) => {
+            write_u64(bytes, abi::EXIT_REASON as usize, abi::EXIT_NONE);
             next as i64
         }
-        aarch64_interp::Step::Unsupported { pc, .. } => {
-            write_u64(head, abi::EXIT_REASON as usize, abi::EXIT_UNSUPPORTED);
-            write_u64(head, abi::EXIT_PC as usize, pc);
+        Step::Unsupported { pc, .. } => {
+            write_u64(bytes, abi::EXIT_REASON as usize, abi::EXIT_UNSUPPORTED);
+            write_u64(bytes, abi::EXIT_PC as usize, pc);
             pc as i64
         }
     }
 }
 
-// --- Register-image (de)serialization at the JIT boundary -------------------
+// --- register-image (de)serialization ---------------------------------------
 
 fn read_u64(mem: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(mem[off..off + 8].try_into().unwrap())
@@ -226,9 +165,9 @@ fn write_u64(mem: &mut [u8], off: usize, val: u64) {
     mem[off..off + 8].copy_from_slice(&val.to_le_bytes());
 }
 
-/// Decode a [`GuestRegs`] image at `base` out of a linear-memory byte slice.
 fn read_regs(mem: &[u8], base: usize) -> GuestRegs {
-    let rd16 = |off: usize| u128::from_le_bytes(mem[base + off..base + off + 16].try_into().unwrap());
+    let rd16 =
+        |off: usize| u128::from_le_bytes(mem[base + off..base + off + 16].try_into().unwrap());
     let mut x = [0u64; 31];
     for (i, slot) in x.iter_mut().enumerate() {
         *slot = read_u64(mem, base + offsets::x(i));
@@ -247,7 +186,6 @@ fn read_regs(mem: &[u8], base: usize) -> GuestRegs {
     }
 }
 
-/// Encode a [`GuestRegs`] image at `base` into a linear-memory byte slice.
 fn write_regs(mem: &mut [u8], base: usize, regs: &GuestRegs) {
     for (i, val) in regs.x.iter().enumerate() {
         write_u64(mem, base + offsets::x(i), *val);

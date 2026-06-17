@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::flags::Flags;
 use crate::regs::GuestRegs;
+use crate::tlb::Tlb;
 
 /// Encoded register index that aliases SP or the zero register.
 pub const SP_OR_ZR: u8 = 31;
@@ -39,6 +40,15 @@ pub struct CpuState {
     pub flags: Flags,
     /// SIMD/FP registers V0..V31 (128-bit). Scalar FP uses the low bits.
     pub v: [u128; 32],
+    /// Translation control registers, pulled out of [`Self::sysregs`] into hot
+    /// fields because the MMU reads them on every translation (SCTLR on *every*
+    /// instruction). A `BTreeMap` lookup here dominated the interpreter's
+    /// profile; a plain field load removes it. MRS/MSR route to these (like
+    /// FPCR/FPSR), and a write flushes the TLB.
+    pub sctlr_el1: u64, // SCTLR_EL1: MMU enable (bit 0) + control
+    pub tcr_el1: u64,   // TCR_EL1: region sizes (T0SZ/T1SZ)
+    pub ttbr0_el1: u64, // TTBR0_EL1: low-half table root
+    pub ttbr1_el1: u64, // TTBR1_EL1: high-half table root
     /// Floating-point control register (rounding mode, default-NaN, etc.).
     pub fpcr: u64,
     /// FPSR — floating-point status register. We model the cumulative (sticky)
@@ -71,6 +81,16 @@ pub struct CpuState {
     /// host-side hint the machine reads (and clears) to sleep through guest idle
     /// instead of busy-spinning. The pure interpreter leaves it for the caller.
     pub wfi: bool,
+    /// Stage-1 translation cache. Not architectural — a host-side accelerator
+    /// that remembers page-table walk results so a repeat access to the same
+    /// page skips the walk. Flushed via [`Self::flush_tlb`] on TLBI and on writes
+    /// to the translation control registers (see the MMU). See [`Tlb`].
+    pub tlb: Tlb,
+    /// Set when the last retired instruction was an `IC` (instruction-cache
+    /// maintenance) — the architecture's signal that guest code changed. Not
+    /// architectural — a host-side hint the JIT organizer reads (and clears) to
+    /// drop stale compiled blocks. The pure interpreter ignores it.
+    pub ic_inval: bool,
 }
 
 impl Default for CpuState {
@@ -81,6 +101,10 @@ impl Default for CpuState {
             pc: 0,
             flags: Flags::default(),
             v: [0; 32],
+            sctlr_el1: 0,
+            tcr_el1: 0,
+            ttbr0_el1: 0,
+            ttbr1_el1: 0,
             fpcr: 0,
             fpsr: 0,
             excl: None,
@@ -92,6 +116,8 @@ impl Default for CpuState {
             powered_off: false,
             pending_abort: None,
             wfi: false,
+            tlb: Tlb::new(),
+            ic_inval: false,
         }
     }
 }
@@ -100,6 +126,12 @@ impl CpuState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Drop all cached stage-1 translations. Called when a translation may have
+    /// changed: a `TLBI` instruction, or a write to TTBR0/TTBR1/TCR/SCTLR.
+    pub fn flush_tlb(&mut self) {
+        self.tlb.flush();
     }
 
     /// Read a general-purpose register. When `idx == 31`, `sp` chooses between

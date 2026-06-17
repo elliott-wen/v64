@@ -7,7 +7,9 @@
 mod flags;
 pub mod regs;
 mod state;
+mod tlb;
 
 pub use flags::Flags;
 pub use regs::GuestRegs;
 pub use state::{Abort, CpuState, SP_OR_ZR};
+pub use tlb::Tlb;

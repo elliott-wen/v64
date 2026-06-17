@@ -11,12 +11,14 @@
 //! or signal as appropriate. `SCTLR_EL1.M` clear means the MMU is off (VA == PA).
 
 use aarch64_cpu_state::CpuState;
-use aarch64_decoder::sysreg_key;
 
 use crate::memory::GuestMem;
 
 /// Output-address mask for a 4KB-granule descriptor (bits [47:12]).
 const OA_MASK: u64 = 0x0000_ffff_ffff_f000;
+
+/// Low bits within a 4KB page (the page offset).
+const PAGE_MASK: u64 = 0xfff;
 
 // ESR fault status codes; the low two bits carry the level the walk faulted at.
 const FSC_TRANSLATION: u8 = 0b0001_00;
@@ -31,12 +33,8 @@ pub enum Access {
     Exec,
 }
 
-fn sysreg(cpu: &CpuState, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u64 {
-    cpu.sysregs.get(&sysreg_key(op0, op1, crn, crm, op2)).copied().unwrap_or(0)
-}
-
 fn mmu_enabled(cpu: &CpuState) -> bool {
-    sysreg(cpu, 3, 0, 1, 0, 0) & 1 == 1 // SCTLR_EL1.M
+    cpu.sctlr_el1 & 1 == 1 // SCTLR_EL1.M (hot field, not the sysreg map)
 }
 
 /// Translate `va` for an access of kind `access` at the current EL. `Ok(pa)` on
@@ -45,9 +43,13 @@ fn mmu_enabled(cpu: &CpuState) -> bool {
 /// `el` is the exception level the permission check is evaluated *at* — normally
 /// the current EL, but 0 for unprivileged (LDTR/STTR) accesses even when issued
 /// from EL1.
-pub fn translate(
-    cpu: &CpuState,
-    mem: &mut dyn GuestMem,
+/// Fast path: MMU off (identity) or a TLB hit. Both are tiny, and `translate` is
+/// called once or twice per instruction; release builds use fat LTO, which
+/// inlines this into the run loop / memory helpers automatically. The cold table
+/// walk is split out into [`translate_miss`] so it never bloats that hot path.
+pub fn translate<M: GuestMem>(
+    cpu: &mut CpuState,
+    mem: &mut M,
     va: u64,
     access: Access,
     el: u8,
@@ -55,13 +57,47 @@ pub fn translate(
     if !mmu_enabled(cpu) {
         return Ok(va);
     }
-    let tcr = sysreg(cpu, 3, 0, 2, 0, 2); // TCR_EL1
+    let va_page = va & !PAGE_MASK;
+
+    // TLB hit: the (expensive) table walk is skipped, but permissions are still
+    // re-checked against the cached leaf — so the same entry is correct for a
+    // read, a write, or a fetch, at EL0 or EL1.
+    if let Some((pa_page, perms)) = cpu.tlb.lookup(va_page) {
+        let leaf = Leaf::unpack(pa_page, perms);
+        return match check_perms(el, &leaf, access) {
+            Ok(()) => Ok(pa_page | (va & PAGE_MASK)),
+            Err(()) => Err(FSC_PERMISSION | leaf.level),
+        };
+    }
+
+    translate_miss(cpu, mem, va, access, el)
+}
+
+/// Cold path: walk the tables on a TLB miss, cache the leaf, then check the
+/// access. A translation or access-flag fault is *not* cached (it isn't a valid
+/// leaf); a permission fault is, since the leaf is valid and only this
+/// particular access is denied.
+#[cold]
+#[inline(never)]
+fn translate_miss<M: GuestMem>(
+    cpu: &mut CpuState,
+    mem: &mut M,
+    va: u64,
+    access: Access,
+    el: u8,
+) -> Result<u64, u8> {
+    let tcr = cpu.tcr_el1;
     let (ttbr, tsz) = if (va >> 55) & 1 == 1 {
-        (sysreg(cpu, 3, 0, 2, 0, 1), (tcr >> 16) & 0x3f) // TTBR1, T1SZ
+        (cpu.ttbr1_el1, (tcr >> 16) & 0x3f) // TTBR1, T1SZ
     } else {
-        (sysreg(cpu, 3, 0, 2, 0, 0), tcr & 0x3f) // TTBR0, T0SZ
+        (cpu.ttbr0_el1, tcr & 0x3f) // TTBR0, T0SZ
     };
-    walk(mem, ttbr & OA_MASK, va, tsz as u32, access, el)
+    let leaf = walk(mem, ttbr & OA_MASK, va, tsz as u32)?;
+    cpu.tlb.insert(va & !PAGE_MASK, leaf.pa_page, leaf.pack());
+    match check_perms(el, &leaf, access) {
+        Ok(()) => Ok(leaf.pa_page | (va & PAGE_MASK)),
+        Err(()) => Err(FSC_PERMISSION | leaf.level),
+    }
 }
 
 /// Hierarchical (table-descriptor) permission restrictions accumulated as the
@@ -74,15 +110,50 @@ struct TablePerms {
     pxn: bool,       // PXNTable: privileged-execute-never in the subtree
 }
 
-/// Walk the 4KB-granule tables from `table_base` (a physical address).
-fn walk(
-    mem: &mut dyn GuestMem,
-    mut table_base: u64,
-    va: u64,
-    tsz: u32,
-    access: Access,
-    el: u8,
-) -> Result<u64, u8> {
+/// A resolved leaf: the page translation plus the permission bits that govern
+/// it, with hierarchical (table-descriptor) restrictions already folded in. This
+/// is exactly what the TLB caches — enough to re-run [`check_perms`] for any
+/// access kind / exception level without touching the page tables again.
+#[derive(Clone, Copy)]
+struct Leaf {
+    /// 4KB-aligned output (physical) address for this page.
+    pa_page: u64,
+    el0_access: bool, // EL0 may access (AP[1], minus APTable restriction)
+    read_only: bool,  // writes fault (AP[2] or APTable)
+    uxn: bool,        // unprivileged-execute-never
+    pxn: bool,        // privileged-execute-never
+    /// Leaf lookup level (0..=3), carried so a permission fault reports it.
+    level: u8,
+}
+
+impl Leaf {
+    /// Pack the permission bits + level into the TLB's opaque `perms` byte.
+    fn pack(&self) -> u8 {
+        (u8::from(self.el0_access))
+            | (u8::from(self.read_only) << 1)
+            | (u8::from(self.uxn) << 2)
+            | (u8::from(self.pxn) << 3)
+            | (self.level << 4)
+    }
+
+    /// Reconstruct a leaf from a cached `(pa_page, perms)` TLB entry.
+    fn unpack(pa_page: u64, perms: u8) -> Self {
+        Self {
+            pa_page,
+            el0_access: perms & 1 != 0,
+            read_only: perms & 0b10 != 0,
+            uxn: perms & 0b100 != 0,
+            pxn: perms & 0b1000 != 0,
+            level: perms >> 4,
+        }
+    }
+}
+
+/// Walk the 4KB-granule tables from `table_base` (a physical address), resolving
+/// the leaf for `va`. Permission checking is deliberately *not* done here — the
+/// caller applies [`check_perms`] to the returned [`Leaf`] (and caches it), so a
+/// later access of a different kind can reuse the same walk result.
+fn walk<M: GuestMem>(mem: &mut M, mut table_base: u64, va: u64, tsz: u32) -> Result<Leaf, u8> {
     let mut level = starting_level(tsz);
     let mut tp = TablePerms::default();
     loop {
@@ -102,9 +173,17 @@ fn walk(
             if desc & (1 << 10) == 0 {
                 return Err(FSC_ACCESS_FLAG | level as u8);
             }
-            check_perms(el, desc, &tp, access).map_err(|()| FSC_PERMISSION | level as u8)?;
             let block_mask = (1u64 << shift) - 1; // low bits within this leaf
-            return Ok((desc & OA_MASK & !block_mask) | (va & block_mask));
+            let pa = (desc & OA_MASK & !block_mask) | (va & block_mask);
+            return Ok(Leaf {
+                pa_page: pa & !PAGE_MASK,
+                // AP[2:1] at bits[7:6]: AP[1]=EL0-access-enable, AP[2]=read-only.
+                el0_access: (desc & (1 << 6) != 0) && !tp.no_el0,
+                read_only: (desc & (1 << 7) != 0) || tp.no_write,
+                uxn: (desc & (1 << 54) != 0) || tp.uxn,
+                pxn: (desc & (1 << 53) != 0) || tp.pxn,
+                level: level as u8,
+            });
         }
 
         // Table descriptor: accumulate hierarchical permission restrictions.
@@ -119,14 +198,10 @@ fn walk(
     }
 }
 
-/// Check a leaf descriptor's permissions for `access` evaluated at exception
-/// level `el`. `Err(())` means a permission fault (the caller adds the level).
-fn check_perms(el: u8, desc: u64, tp: &TablePerms, access: Access) -> Result<(), ()> {
-    // AP[2:1] at bits[7:6]: AP[1]=EL0-access-enable, AP[2]=read-only.
-    let el0_access = (desc & (1 << 6) != 0) && !tp.no_el0;
-    let read_only = (desc & (1 << 7) != 0) || tp.no_write;
-    let uxn = (desc & (1 << 54) != 0) || tp.uxn;
-    let pxn = (desc & (1 << 53) != 0) || tp.pxn;
+/// Check a resolved leaf's permissions for `access` evaluated at exception level
+/// `el`. `Err(())` means a permission fault (the caller adds the level).
+fn check_perms(el: u8, leaf: &Leaf, access: Access) -> Result<(), ()> {
+    let Leaf { el0_access, read_only, uxn, pxn, .. } = *leaf;
     let el0 = el == 0;
 
     match access {

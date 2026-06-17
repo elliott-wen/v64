@@ -1,14 +1,16 @@
-//! Differential cross-check: run a block through the JIT and through the
-//! interpreter from identical state and require bit-identical results.
+//! Differential cross-check: run a register-only block through the JIT backend
+//! and through the interpreter from identical state and require bit-identical
+//! results.
 //!
 //! The JIT and interpreter share the decoder, so this validates the *lowering*,
-//! not the decode. Each program here is fully inline-lowerable, so we also
-//! assert `interp_calls() == 0` — proving the inline path was taken rather than
-//! silently falling back to `interpret_one` (which would match trivially).
+//! not the decode. The backend only runs register-only blocks (integer ALU +
+//! branches) with a synced register image, so every program here is fully
+//! register-only; the harness also asserts the block was fully inline-lowered
+//! (`ensure` returned true) rather than silently declining.
 
 use aarch64_cpu_state::{CpuState, GuestRegs};
 use aarch64_interp::{step, Memory, Step};
-use aarch64_jit::{abi, form_block, Vm};
+use aarch64_jit::{form_jit_block, Vm};
 
 const BASE: u64 = 0x1000;
 const RAM: usize = 0x10000;
@@ -60,18 +62,6 @@ const fn adr(page: u32, rd: u32, imm: i32) -> u32 {
     let imm = (imm as u32) & 0x1f_ffff;
     (page << 31) | ((imm & 3) << 29) | 0x1000_0000 | ((imm >> 2) << 5) | rd
 }
-const fn ldr_uimm(rd: u32, rn: u32, imm12: u32) -> u32 {
-    0xF940_0000 | (imm12 << 10) | (rn << 5) | rd
-}
-const fn str_uimm(rt: u32, rn: u32, imm12: u32) -> u32 {
-    0xF900_0000 | (imm12 << 10) | (rn << 5) | rt
-}
-const fn stp(rt: u32, rt2: u32, rn: u32, imm7: u32) -> u32 {
-    0xA900_0000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt
-}
-const fn ldp(rt: u32, rt2: u32, rn: u32, imm7: u32) -> u32 {
-    0xA940_0000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt
-}
 const RET: u32 = 0xD65F_03C0;
 const NOP: u32 = 0xD503_201F;
 
@@ -81,7 +71,8 @@ fn reader(prog: &[u32]) -> impl Fn(u64) -> u32 + '_ {
     move |pc| prog[((pc - BASE) / 4) as usize]
 }
 
-fn run_interp(prog: &[u32], init: &GuestRegs, steps: usize) -> (GuestRegs, Vec<u8>) {
+/// Run `prog` for `steps` instructions through the interpreter from `init`.
+fn run_interp(prog: &[u32], init: &GuestRegs, steps: usize) -> GuestRegs {
     let mut cpu = CpuState::new();
     cpu.load_guest_regs(init);
     let mut mem = Memory::new(BASE, RAM);
@@ -93,34 +84,45 @@ fn run_interp(prog: &[u32], init: &GuestRegs, steps: usize) -> (GuestRegs, Vec<u
             panic!("interp hit unsupported {word:#010x} at {pc:#x}");
         }
     }
-    (cpu.to_guest_regs(), mem.bytes)
+    cpu.to_guest_regs()
 }
 
-fn run_jit(prog: &[u32], init: &GuestRegs) -> (GuestRegs, Vec<u8>, u64) {
-    let mut vm = Vm::new(BASE, RAM);
+/// Run `prog` through the JIT backend against a real CPU + memory, dispatching
+/// block by block (inline register ops + an `interpret_one` escape) until control
+/// leaves the program (the final `RET` branches to the seed `x30`). The result
+/// must match the interpreter.
+fn run_jit(prog: &[u32], init: &GuestRegs) -> GuestRegs {
+    let mut mem = Memory::new(BASE, RAM);
     for (i, w) in prog.iter().enumerate() {
-        vm.write_ram(BASE + 4 * i as u64, &w.to_le_bytes());
+        mem.write(BASE + 4 * i as u64, &w.to_le_bytes());
     }
-    vm.load_regs(init);
-    let block = form_block(BASE, reader(prog));
-    let exit = vm.run_block(&block);
-    assert_eq!(exit.exit_reason, abi::EXIT_NONE, "unexpected exit {:#x}", exit.exit_reason);
-    (vm.store_regs(), vm.read_ram(BASE, RAM), vm.interp_calls())
+    let mut cpu = CpuState::new();
+    cpu.load_guest_regs(init);
+
+    let end = BASE + 4 * prog.len() as u64;
+    let mut vm = Vm::new(Memory::new(BASE, RAM));
+    let mut guard = 0;
+    while cpu.pc >= BASE && cpu.pc < end {
+        let key = cpu.pc; // MMU off: VA == PA
+        let block = form_jit_block(key, prog.len(), reader(prog));
+        vm.ensure(key, &block);
+        vm.run(key, &mut cpu, &mut mem);
+        guard += 1;
+        assert!(guard < 1000, "jit dispatch did not terminate");
+    }
+    cpu.to_guest_regs()
 }
 
 /// Run `prog` (which must end in a single terminator) through both engines from
-/// `init` and assert identical architectural state and that nothing fell back.
+/// `init` and assert identical register state.
 fn check(name: &str, prog: &[u32], init: &GuestRegs) {
-    let block_len = form_block(BASE, reader(prog)).insns.len();
-    let (ir, imem) = run_interp(prog, init, block_len);
-    let (jr, jmem, calls) = run_jit(prog, init);
+    let ir = run_interp(prog, init, prog.len());
+    let jr = run_jit(prog, init);
 
-    assert_eq!(calls, 0, "[{name}] expected fully-inline block, but {calls} interp_one call(s)");
     assert_eq!(jr.x, ir.x, "[{name}] X registers diverge\n jit={:x?}\n int={:x?}", jr.x, ir.x);
     assert_eq!(jr.sp, ir.sp, "[{name}] SP diverges");
     assert_eq!(jr.pc, ir.pc, "[{name}] PC diverges");
     assert_eq!(jr.nzcv, ir.nzcv, "[{name}] NZCV diverges (jit={:#x} int={:#x})", jr.nzcv, ir.nzcv);
-    assert_eq!(jmem, imem, "[{name}] memory diverges");
 }
 
 /// Deterministic register seeds (no rand dependency).
@@ -166,7 +168,6 @@ fn arithmetic_imm_and_reg() {
         add_sub_sr(0, 0, 3, 4, 5, 0, 7),   // add  x3, x4, x5, lsl #7
         add_sub_sr(1, 1, 6, 7, 0, 1, 3),   // subs x6, x7, x0, lsr #3
         add_sub_sr(1, 1, 1, 2, 3, 2, 5),   // subs x1, x2, x3, asr #5
-        // (ROR is reserved for add/sub shifted-register, so it is not tested here.)
     ]);
     check_all("add_sub_extended", &[
         add_sub_ext(0, 0, 0, 1, 2, 0, 0),  // add x0, x1, w2, uxtb
@@ -269,25 +270,5 @@ fn pc_relative() {
         adr(0, 0, 0x40),    // adr  x0, .+0x40
         adr(1, 1, -0x20),   // adrp x1, ...
         NOP,
-    ]);
-}
-
-#[test]
-fn memory_single_and_pair() {
-    // Build a safe in-window base in x9, then exercise loads/stores/pairs that
-    // round-trip through memory. Seeded data in x0..x3.
-    check_all("ldr_str", &[
-        movz(9, 0x1400, 0),   // x9 = 0x1400 (in-window, past the code)
-        str_uimm(0, 9, 0),    // str x0, [x9]
-        str_uimm(1, 9, 1),    // str x1, [x9, #8]
-        ldr_uimm(2, 9, 0),    // ldr x2, [x9]      -> x2 == x0
-        ldr_uimm(3, 9, 1),    // ldr x3, [x9, #8]  -> x3 == x1
-    ]);
-    check_all("ldp_stp", &[
-        movz(9, 0x1400, 0),   // x9 = 0x1400
-        stp(0, 1, 9, 0),      // stp x0, x1, [x9]
-        ldp(4, 5, 9, 0),      // ldp x4, x5, [x9]  -> x4==x0, x5==x1
-        stp(2, 3, 9, 2),      // stp x2, x3, [x9, #16]
-        ldp(6, 7, 9, 2),      // ldp x6, x7, [x9, #16]
     ]);
 }

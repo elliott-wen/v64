@@ -15,7 +15,7 @@ use crate::{
     ldst, logical_imm, logical_reg, move_wide, pc_rel, psci, simd, system, test_branch,
 };
 
-pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc: u64) -> Option<u64> {
+pub(crate) fn execute<M: GuestMem>(cpu: &mut CpuState, mem: &mut M, insn: Insn, pc: u64) -> Option<u64> {
     match insn {
         Insn::MoveWide { sf, opc, hw, imm16, rd } => move_wide::exec(cpu, sf, opc, hw, imm16, rd),
         Insn::AddSubImm { sf, sub, set_flags, shift12, imm12, rn, rd } => {
@@ -191,6 +191,17 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc
         Insn::Brk { imm16 } => exception::brk(cpu, imm16, pc),
         Insn::DcZva { rt } => {
             crate::mem_access::dc_zva(cpu, mem, rt);
+            None
+        }
+        // TLBI: a translation table may have changed; drop cached walk results.
+        Insn::Tlbi => {
+            cpu.flush_tlb();
+            None
+        }
+        // IC: instruction-cache maintenance — no cache modelled, but flag that
+        // guest code changed so the JIT organizer can drop stale compiled blocks.
+        Insn::Ic => {
+            cpu.ic_inval = true;
             None
         }
         // PRFM is a hint with no architectural effect — execute as a no-op.

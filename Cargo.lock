@@ -17,7 +17,6 @@ dependencies = [
  "aarch64-cpu-state",
  "aarch64-decoder",
  "aarch64-interp",
- "aarch64-jit",
  "unicorn-engine",
 ]
 
@@ -47,6 +46,7 @@ dependencies = [
  "aarch64-cpu-state",
  "aarch64-decoder",
  "aarch64-interp",
+ "aarch64-jit",
  "sdl2",
 ]
 

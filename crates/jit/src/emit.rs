@@ -1,52 +1,49 @@
-//! WASM emitter for a formed block (Milestone 2 block ABI).
+//! WASM emitter for a JIT block.
 //!
-//! The emitted module imports the shared linear memory and the `interpret_one`
-//! host helper, and exports a single function [`BLOCK_FUNC`] with the block ABI
-//! signature `(param $regs_base i32) -> i64` (next guest PC).
+//! The emitted module imports the shared linear memory (holding the guest
+//! register image) and the `interpret_one` host helper, and exports a single
+//! function [`BLOCK_FUNC`] with the block ABI signature
+//! `(param $regs_base i32) -> i64` (next guest PC).
 //!
-//! Each instruction is either **lowered inline** (see [`crate::lower`]) or, if
-//! not yet handled, emitted as a `call interpret_one` — the escape hatch that
-//! steps one guest instruction through the interpreter. Because a block is
-//! straight-line and terminated by its last instruction, processing it in order
-//! reproduces it exactly: non-terminators leave nothing on the stack (inline) or
-//! drop their sequential PC (helper), and the terminator's `interpret_one` call
-//! yields the real next guest PC, which the function returns.
-//!
-//! Inline lowerings keep the register-image PC consistent themselves, so they
-//! and helper calls can be freely interleaved. The terminator is never lowered
-//! inline (it's a branch/exception), so it always goes through `interpret_one`.
+//! A block is a leading run of always-inline-lowerable register ops (see
+//! [`crate::can_inline`]) terminated by exactly one *escape* instruction — its
+//! last. The leading ops are lowered inline ([`crate::lower`]); the escape (a
+//! branch, load/store, system op, …) is executed by `call interpret_one`, which
+//! single-steps the interpreter against the shared CPU + bus and returns the
+//! next guest PC. Because the escape is always last, nothing it triggers (a
+//! taken branch, a fault that vectors) can corrupt later inline ops — there are
+//! none. A register-only branch terminator is lowered inline instead of escaped.
 
 use wasm_encoder::{
     CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
     Instruction, MemoryType, Module, TypeSection, ValType,
 };
 
-use crate::block::{is_terminator, Block};
+use aarch64_decoder::{is_terminator, Block};
 
 /// Name of the exported block entry function.
 pub const BLOCK_FUNC: &str = "block";
 
-/// Imported-function index of `interpret_one` (it is the only function import,
-/// so it occupies func index 0; the block function follows at index 1).
+/// Imported-function index of `interpret_one` (the only function import, so func
+/// index 0; the block function follows at index 1).
 const INTERPRET_ONE: u32 = 0;
 
 /// Emit a self-contained WASM module exporting [`BLOCK_FUNC`].
 ///
-/// `guest_base` is the base guest address of the VM's RAM window, needed to fold
-/// the guest→linear address displacement into inline memory accesses.
-///
 /// Imports (resolved by the runtime's linker):
-/// - `env.interpret_one : (i32) -> i64` — single-instruction escape hatch.
-/// - `env.memory` — the shared linear memory holding the register image + RAM.
+/// - `env.interpret_one : (i32) -> i64` — single-step the interpreter on the
+///   shared CPU + bus, for the block's escape instruction.
+/// - `env.memory` — the shared linear memory holding the register image.
+///
+/// `guest_base` is accepted for ABI symmetry; inline register ops never touch
+/// memory, so it is unused.
 pub fn emit_block(block: &Block, guest_base: u64) -> Vec<u8> {
     let mut module = Module::new();
 
-    // One shared signature for both interpret_one and the block function.
     let mut types = TypeSection::new();
     types.ty().function([ValType::I32], [ValType::I64]);
     module.section(&types);
 
-    // Imports: the helper function (func 0) and the shared memory (mem 0).
     let mut imports = ImportSection::new();
     imports.import("env", "interpret_one", EntityType::Function(0));
     imports.import(
@@ -78,45 +75,33 @@ pub fn emit_block(block: &Block, guest_base: u64) -> Vec<u8> {
     module.finish()
 }
 
-/// Build the block function body: each instruction is lowered inline where
-/// possible, otherwise via `interpret_one`; the terminator's next guest PC is
-/// the function result.
+/// Build the block function body: inline every instruction but the last, and the
+/// last either as an inline branch terminator or an `interpret_one` escape whose
+/// returned next-PC is the function result.
 fn emit_body(block: &Block, guest_base: u64) -> Function {
     let mut f = Function::new([
         (crate::lower::SCRATCH_I64, ValType::I64),
         (crate::lower::SCRATCH_I32, ValType::I32),
     ]);
     let n = block.insns.len();
-    debug_assert!(n > 0, "form_block always produces at least one instruction");
+    debug_assert!(n > 0, "form produces at least one instruction");
 
     for (i, (pc, insn)) in block.insns.iter().enumerate() {
         let is_last = i + 1 == n;
-
         if is_last {
-            // The last instruction must leave the next-PC i64 result on the
-            // stack. Three ways, in order of preference:
-            //   1. an inlined terminator (computes its own next PC);
-            //   2. an inlined non-terminator, followed by the sequential PC;
-            //   3. interpret_one (returns the next PC) for anything not lowered.
-            if is_terminator(insn) {
-                if crate::lower::lower_terminator(&mut f, insn, *pc) {
-                    continue;
-                }
-            } else if crate::lower::lower_sequential(&mut f, insn, *pc, guest_base) {
-                f.instruction(&Instruction::I64Const(pc.wrapping_add(4) as i64));
+            // Inline a register-only branch terminator; otherwise escape to the
+            // interpreter, whose returned i64 next-PC is the function result.
+            if is_terminator(insn) && crate::lower::lower_terminator(&mut f, insn, *pc) {
                 continue;
             }
             f.instruction(&Instruction::LocalGet(0)); // $regs_base
             f.instruction(&Instruction::Call(INTERPRET_ONE));
         } else {
-            // Non-terminators leave nothing on the stack: inline, or
-            // interpret_one whose (sequential) next-PC result is discarded.
-            if crate::lower::lower_sequential(&mut f, insn, *pc, guest_base) {
-                continue;
-            }
-            f.instruction(&Instruction::LocalGet(0));
-            f.instruction(&Instruction::Call(INTERPRET_ONE));
-            f.instruction(&Instruction::Drop);
+            // Non-last instructions are always inline-lowerable by construction
+            // (block formation stops the inline run at the first that isn't).
+            debug_assert!(crate::can_inline(insn), "non-last block instruction must be inlinable");
+            let ok = crate::lower::lower_sequential(&mut f, insn, *pc, guest_base);
+            debug_assert!(ok, "can_inline instruction failed to lower");
         }
     }
     f.instruction(&Instruction::End);

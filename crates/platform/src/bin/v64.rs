@@ -155,6 +155,13 @@ mod sdl_ui {
         sdl.mouse().set_relative_mouse_mode(true); // deliver relative motion
         let mut out = std::io::stdout();
 
+        // Throughput readout: sample the retired-instruction counter against wall
+        // time roughly once a second and print millions of instructions/sec (MIPS)
+        // to stderr, so we have a live indication of simulation speed.
+        let start = std::time::Instant::now();
+        let mut last_report = start;
+        let mut last_insns = 0u64;
+
         'main: loop {
             for ev in events.poll_iter() {
                 match ev {
@@ -187,6 +194,23 @@ mod sdl_ui {
             }
 
             let stop = board.machine.run(0, super::BATCH);
+
+            // Report instructions/sec about once a second (instantaneous over the
+            // last window, plus the lifetime average).
+            let now = std::time::Instant::now();
+            let since = now.duration_since(last_report);
+            if since.as_secs_f64() >= 1.0 {
+                let total = board.machine.total_insns();
+                let window = total - last_insns;
+                let inst_mips = window as f64 / since.as_secs_f64() / 1e6;
+                let avg_mips = total as f64 / start.elapsed().as_secs_f64() / 1e6;
+                eprintln!(
+                    "v64: {total} insns | {inst_mips:.2} MIPS (now) | {avg_mips:.2} MIPS (avg)"
+                );
+                last_report = now;
+                last_insns = total;
+            }
+
             let tx = board.uart.take_tx();
             if !tx.is_empty() {
                 let _ = out.write_all(&tx);

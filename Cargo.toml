@@ -18,4 +18,15 @@ license = "MIT OR Apache-2.0"
 aarch64-cpu-state = { path = "crates/cpu" }
 aarch64-decoder = { path = "crates/decoder" }
 aarch64-interp = { path = "crates/interp" }
+aarch64-jit = { path = "crates/jit" }
 aarch64-platform = { path = "crates/platform" }
+
+# Release builds favour the interpreter's hot loop: fat LTO lets the compiler
+# inline across crate boundaries (decode handlers into `execute`, the MMU
+# fast-path into the run loop, RAM accesses into the bus), and a single codegen
+# unit removes the parallelism-driven inlining cutoffs. This is the free win the
+# manual `#[inline]`/`#[cold]` hints only approximate; it does *not* devirtualise
+# `&mut dyn GuestMem` calls (that needs the generic-memory refactor).
+[profile.release]
+lto = "fat"
+codegen-units = 1

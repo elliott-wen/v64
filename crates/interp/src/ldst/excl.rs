@@ -6,7 +6,7 @@ use crate::mem_access::{align_check, read, write};
 use crate::memory::GuestMem;
 
 /// LDXR/LDAXR: load and arm the exclusive monitor with `(addr, value)`.
-pub(crate) fn load(cpu: &mut CpuState, mem: &mut dyn GuestMem, size: u8, rt: u8, rn: u8) -> Option<u64> {
+pub(crate) fn load<M: GuestMem>(cpu: &mut CpuState, mem: &mut M, size: u8, rt: u8, rn: u8) -> Option<u64> {
     let addr = cpu.read_gpr(rn, true);
     if align_check(cpu, addr, 1 << size, false) {
         return None; // unaligned exclusive: Alignment Data Abort
@@ -27,9 +27,9 @@ pub(crate) fn load(cpu: &mut CpuState, mem: &mut dyn GuestMem, size: u8, rt: u8,
 /// STXR/STLXR: store iff the monitor is still armed for this address and memory
 /// is unchanged (an intervening write changes the value and fails the store).
 /// Ws gets 0 on success, 1 on failure; the monitor is always cleared.
-pub(crate) fn store(
+pub(crate) fn store<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     size: u8,
     rs: u8,
     rt: u8,
@@ -53,9 +53,9 @@ pub(crate) fn store(
 /// LDXP/LDAXP: load two `1<<size`-byte elements and arm the monitor. In a
 /// single-threaded model the monitor only needs to detect intervening writes,
 /// so it tracks the base address and the first element's value.
-pub(crate) fn load_pair(
+pub(crate) fn load_pair<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     size: u8,
     rt: u8,
     rt2: u8,
@@ -84,9 +84,9 @@ pub(crate) fn load_pair(
 
 /// STXP/STLXP: store the pair iff the monitor is still armed for this address;
 /// Ws gets 0 on success, 1 on failure. The monitor is always cleared.
-pub(crate) fn store_pair(
+pub(crate) fn store_pair<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     size: u8,
     rs: u8,
     rt: u8,

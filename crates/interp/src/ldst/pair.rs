@@ -7,9 +7,9 @@ use crate::mem_access;
 use crate::memory::GuestMem;
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn exec(
+pub(crate) fn exec<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     is_load: bool,
     signed: bool,
     width8: bool,
@@ -91,7 +91,7 @@ pub(crate) fn exec(
     None
 }
 
-fn load_elem(cpu: &mut CpuState, mem: &mut dyn GuestMem, addr: u64, width8: bool, signed: bool) -> u64 {
+fn load_elem<M: GuestMem>(cpu: &mut CpuState, mem: &mut M, addr: u64, width8: bool, signed: bool) -> u64 {
     let size = if width8 { 3 } else { 2 };
     let raw = mem_access::read(cpu, mem, addr, size);
     if signed {

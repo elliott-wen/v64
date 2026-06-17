@@ -20,6 +20,56 @@ fn key_fpsr() -> u32 {
     sysreg_key(3, 3, 4, 4, 1)
 }
 
+// The translation-control registers live in dedicated `CpuState` fields (the
+// MMU reads them on the hot path), so MRS/MSR route here instead of the map.
+fn key_sctlr_el1() -> u32 {
+    sysreg_key(3, 0, 1, 0, 0)
+}
+fn key_tcr_el1() -> u32 {
+    sysreg_key(3, 0, 2, 0, 2)
+}
+fn key_ttbr0_el1() -> u32 {
+    sysreg_key(3, 0, 2, 0, 0)
+}
+fn key_ttbr1_el1() -> u32 {
+    sysreg_key(3, 0, 2, 0, 1)
+}
+
+/// Read a translation-control register from its dedicated field, or `None` if
+/// `key` isn't one of them.
+fn read_xlate_reg(cpu: &CpuState, key: u32) -> Option<u64> {
+    if key == key_sctlr_el1() {
+        Some(cpu.sctlr_el1)
+    } else if key == key_tcr_el1() {
+        Some(cpu.tcr_el1)
+    } else if key == key_ttbr0_el1() {
+        Some(cpu.ttbr0_el1)
+    } else if key == key_ttbr1_el1() {
+        Some(cpu.ttbr1_el1)
+    } else {
+        None
+    }
+}
+
+/// Write a translation-control register to its dedicated field and flush the TLB
+/// (the cached walks are now stale). Returns `true` if `key` was one of them.
+fn write_xlate_reg(cpu: &mut CpuState, key: u32, val: u64) -> bool {
+    let field = if key == key_sctlr_el1() {
+        &mut cpu.sctlr_el1
+    } else if key == key_tcr_el1() {
+        &mut cpu.tcr_el1
+    } else if key == key_ttbr0_el1() {
+        &mut cpu.ttbr0_el1
+    } else if key == key_ttbr1_el1() {
+        &mut cpu.ttbr1_el1
+    } else {
+        return false;
+    };
+    *field = val;
+    cpu.flush_tlb();
+    true
+}
+
 pub(crate) fn exec(cpu: &mut CpuState, read: bool, key: u32, rt: u8) -> Option<u64> {
     // SP_EL0/SP_EL1 are banked stack pointers, not plain map entries.
     let sp_bank = if key == key_sp_el0() {
@@ -36,6 +86,8 @@ pub(crate) fn exec(cpu: &mut CpuState, read: bool, key: u32, rt: u8) -> Option<u
             cpu.fpcr
         } else if key == key_fpsr() {
             cpu.fpsr
+        } else if let Some(v) = read_xlate_reg(cpu, key) {
+            v
         } else {
             match sp_bank {
                 Some(idx) => cpu.read_sp_el(idx),
@@ -53,6 +105,8 @@ pub(crate) fn exec(cpu: &mut CpuState, read: bool, key: u32, rt: u8) -> Option<u
             cpu.fpcr = val;
         } else if key == key_fpsr() {
             cpu.fpsr = val;
+        } else if write_xlate_reg(cpu, key, val) {
+            // Routed to a dedicated translation-control field; TLB flushed.
         } else {
             match sp_bank {
                 Some(idx) => cpu.write_sp_el(idx, val),

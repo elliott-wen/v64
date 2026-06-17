@@ -1,6 +1,12 @@
-//! Block formation: decode forward from a start PC until a terminator.
+//! Block discovery: decode forward from a start PC until a terminator.
+//!
+//! A *block* is a straight-line run of guest instructions ending at the first
+//! control-flow/trap boundary. It is the unit the platform execution loop
+//! organizes around: the interpreter executes a block by stepping it
+//! instruction-by-instruction, and the JIT compiles eligible blocks. Discovery
+//! lives here (the decode layer) so every consumer agrees on block boundaries.
 
-use aarch64_decoder::{decode, Insn};
+use crate::{decode, Insn};
 
 /// A straight-line run of guest instructions ending in a terminator.
 pub struct Block {
@@ -17,17 +23,13 @@ pub fn form_block(start: u64, read: impl Fn(u64) -> u32) -> Block {
     form_block_bounded(start, None, MAX_BLOCK, read)
 }
 
-/// Form a block, additionally bounded by the dispatcher's stop conditions:
+/// Form a block, additionally bounded by a stop address and a length cap:
 ///
 /// - `until`: if the *next* instruction would be at this guest address, end the
-///   block first (the dispatcher stops there before executing it, mirroring
-///   `run()`'s top-of-loop `until` check).
-/// - `max_len`: cap the instruction count (used to honor an instruction `count`
-///   budget; also clamped to [`MAX_BLOCK`]).
+///   block first (so the caller can stop there before executing it).
+/// - `max_len`: cap the instruction count (also clamped to [`MAX_BLOCK`]).
 ///
-/// The block still ends at the first terminator if one is reached sooner. When
-/// it ends on a `max_len`/`until` boundary instead, the last instruction is a
-/// non-terminator — the emitter handles that by returning the sequential next PC.
+/// The block still ends at the first terminator if one is reached sooner.
 pub fn form_block_bounded(
     start: u64,
     until: Option<u64>,
@@ -53,7 +55,8 @@ pub fn form_block_bounded(
     Block { start, insns }
 }
 
-/// Whether an instruction ends a block: it may redirect control flow or trap.
+/// Whether an instruction ends a block: it redirects control flow or traps, so
+/// it must be the last instruction in a straight-line run.
 pub fn is_terminator(insn: &Insn) -> bool {
     matches!(
         insn,

@@ -18,9 +18,9 @@ use crate::mem_access;
 use crate::memory::GuestMem;
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn exec(
+pub(crate) fn exec<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     size: u8,
     is_load: bool,
     signed: bool,

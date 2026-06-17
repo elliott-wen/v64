@@ -23,7 +23,7 @@ pub enum StopReason {
 /// (`count == 0` means unbounded until `until`). Mirrors Unicorn's
 /// `emu_start(begin, until, _timeout, count)` contract so the two can be
 /// compared directly in the differential harness.
-pub fn run(cpu: &mut CpuState, mem: &mut dyn GuestMem, until: u64, count: usize) -> StopReason {
+pub fn run<M: GuestMem>(cpu: &mut CpuState, mem: &mut M, until: u64, count: usize) -> StopReason {
     let mut executed = 0usize;
     loop {
         if cpu.pc == until {
@@ -78,7 +78,7 @@ pub enum Step {
 /// This is the single-step primitive the JIT's `interpret_one` escape hatch is
 /// built on. It mirrors one iteration of [`run`]'s loop body; `run` is left
 /// deliberately independent of it so it stays the untouched reference loop.
-pub fn step(cpu: &mut CpuState, mem: &mut dyn GuestMem) -> Step {
+pub fn step<M: GuestMem>(cpu: &mut CpuState, mem: &mut M) -> Step {
     let pc = cpu.pc;
     let fetch_pa = match crate::mmu::translate(cpu, mem, pc, crate::mmu::Access::Exec, cpu.el) {
         Ok(pa) => pa,
@@ -100,3 +100,4 @@ pub fn step(cpu: &mut CpuState, mem: &mut dyn GuestMem) -> Step {
     };
     Step::Next(cpu.pc)
 }
+

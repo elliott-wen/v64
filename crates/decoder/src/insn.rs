@@ -426,6 +426,17 @@ pub enum Insn {
     /// has a real architectural effect (used by `clear_page`/`memset`).
     DcZva { rt: u8 },
 
+    /// TLBI — TLB invalidate (any variant). We model one unified TLB and flush it
+    /// wholesale. The guest must issue this after editing a translation table, so
+    /// it is the interpreter's signal to drop cached page-table walk results.
+    Tlbi,
+
+    /// IC — instruction-cache maintenance (IALLU/IALLUIS/IVAU). We model no
+    /// caches, so it has no architectural effect, but it is the architecture's
+    /// signal that guest *code* changed — the JIT organizer drops compiled blocks
+    /// when it executes (self-modifying code / patched kernel text).
+    Ic,
+
     /// BRK #imm — software breakpoint, a synchronous exception to EL1 (debug).
     /// Used by kernel `BUG()`/`WARN()` and userspace `__builtin_trap`.
     Brk { imm16: u16 },

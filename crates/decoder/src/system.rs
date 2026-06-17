@@ -57,8 +57,19 @@ pub(crate) fn decode(word: u32) -> Insn {
         if l == 0 && op1 == 0b011 && crn == 0b0111 && crm == 0b0100 && op2 == 0b001 {
             return Insn::DcZva { rt };
         }
-        // TLBI / IC / other DC / AT: no architectural effect we model. A SYSL
-        // read (L=1) is rarer still; treat as a no-op (its Rt is left unchanged).
+        // TLBI (CRn=1000): TLB maintenance. We model a single unified TLB and
+        // invalidate it wholesale, so every TLBI variant maps to the same flush.
+        if l == 0 && crn == 0b1000 {
+            return Insn::Tlbi;
+        }
+        // IC (CRn=0111, CRm=0001 IALLUIS / CRm=0101 IALLU/IVAU): instruction-cache
+        // maintenance — the architecture's "code changed" signal, used by the JIT
+        // to drop stale compiled blocks.
+        if l == 0 && crn == 0b0111 && (crm == 0b0001 || crm == 0b0101) {
+            return Insn::Ic;
+        }
+        // Other DC / AT: no cache/translation state we model. A SYSL read
+        // (L=1) is rarer still; treat as a no-op (its Rt is left unchanged).
         return Insn::Nop;
     }
 

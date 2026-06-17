@@ -6,9 +6,9 @@ use aarch64_cpu_state::CpuState;
 use crate::mem_access::{align_check, read, write};
 use crate::memory::GuestMem;
 
-pub(crate) fn exec(
+pub(crate) fn exec<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     size: u8,
     rs: u8,
     rn: u8,
@@ -44,9 +44,9 @@ pub(crate) fn exec(
 /// CASP: compare-and-swap pair. Compares the two elements at `[Rn]` against
 /// Rs:Rs+1; on a match stores Rt:Rt+1. Rs:Rs+1 always receive the old pair.
 /// `sz` selects 4-byte (0) vs 8-byte (1) elements.
-pub(crate) fn cas_pair(
+pub(crate) fn cas_pair<M: GuestMem>(
     cpu: &mut CpuState,
-    mem: &mut dyn GuestMem,
+    mem: &mut M,
     sz: u8,
     rs: u8,
     rn: u8,
