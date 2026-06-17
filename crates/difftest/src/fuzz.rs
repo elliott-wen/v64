@@ -18,6 +18,7 @@
 //! | either        | `Fault`       | runtime fault (e.g. unmapped) -> skipped|
 
 use crate::rng::Rng;
+#[cfg(feature = "unicorn")]
 use crate::vector::TestVector;
 
 #[cfg(feature = "unicorn")]
@@ -79,6 +80,7 @@ pub struct FpClass {
 }
 
 /// Random architectural state for a single-step vector (no code yet).
+#[cfg(feature = "unicorn")]
 fn random_state(rng: &mut Rng) -> TestVector {
     let mut tv = TestVector::default();
     tv.count = 1;
@@ -90,9 +92,59 @@ fn random_state(rng: &mut Rng) -> TestVector {
     tv
 }
 
+/// Build one random single-step vector for a simple (word-only) class.
+///
+/// The encoder is drawn first, then the random state, so the RNG stream is
+/// identical whether a class runs serially or through the parallel pool.
+#[cfg(feature = "unicorn")]
+pub(crate) fn vector_simple(class: &Class, rng: &mut Rng) -> TestVector {
+    let word = (class.encode)(rng);
+    let mut tv = random_state(rng);
+    tv.code = word.to_le_bytes().to_vec();
+    tv
+}
+
+/// Build one random single-step vector for an FP/SIMD class.
+#[cfg(feature = "unicorn")]
+pub(crate) fn vector_fp(class: &FpClass, rng: &mut Rng) -> TestVector {
+    let enc = (class.encode)(rng);
+    let mut tv = random_state(rng);
+    tv.code = enc.word.to_le_bytes().to_vec();
+    tv.init_v = Some(enc.init_v);
+    tv.init_fpcr = enc.fpcr;
+    for (reg, val) in &enc.gpr_seeds {
+        tv.init_x[*reg as usize] = *val;
+    }
+    tv
+}
+
+/// Build one random single-step vector for a memory class.
+#[cfg(feature = "unicorn")]
+pub(crate) fn vector_mem(class: &MemClass, rng: &mut Rng) -> TestVector {
+    let enc = (class.encode)(rng);
+    let mut tv = random_state(rng);
+    tv.code = enc.word.to_le_bytes().to_vec();
+    for (reg, val) in &enc.seeds {
+        if *reg == 31 {
+            tv.init_sp = *val;
+        } else {
+            tv.init_x[*reg as usize] = *val;
+        }
+    }
+    tv.init_data = Some(enc.data);
+    if !enc.init_v.is_empty() {
+        let mut v = [0u128; 32];
+        for (reg, val) in &enc.init_v {
+            v[*reg as usize] = *val;
+        }
+        tv.init_v = Some(v);
+    }
+    tv
+}
+
 /// One comparison outcome for a prepared vector.
 #[cfg(feature = "unicorn")]
-enum Step {
+pub(crate) enum Step {
     Compared,
     Reserved,
     Faulted,
@@ -101,7 +153,7 @@ enum Step {
 /// Run a prepared vector on both sides and classify, enforcing the validity
 /// invariant. `here` lazily builds the failure-context prefix.
 #[cfg(feature = "unicorn")]
-fn step(tv: &TestVector, here: &dyn Fn() -> String) -> Result<Step, String> {
+pub(crate) fn step(tv: &TestVector, here: &dyn Fn() -> String) -> Result<Step, String> {
     let (ours, stop) = run_ours(tv);
     let ours_invalid = matches!(stop, StopReason::Unsupported { .. });
 
@@ -134,7 +186,7 @@ fn step(tv: &TestVector, here: &dyn Fn() -> String) -> Result<Step, String> {
 }
 
 #[cfg(feature = "unicorn")]
-fn tally(step: Step, compared: &mut u32, reserved: &mut u32, faulted: &mut u32) {
+pub(crate) fn tally(step: Step, compared: &mut u32, reserved: &mut u32, faulted: &mut u32) {
     match step {
         Step::Compared => *compared += 1,
         Step::Reserved => *reserved += 1,
@@ -149,9 +201,8 @@ pub fn fuzz_class(class: &Class, iters: u32, seed: u64) -> Result<FuzzReport, St
     let (mut compared, mut reserved, mut faulted) = (0, 0, 0);
 
     for i in 0..iters {
-        let word = (class.encode)(&mut rng);
-        let mut tv = random_state(&mut rng);
-        tv.code = word.to_le_bytes().to_vec();
+        let tv = vector_simple(class, &mut rng);
+        let word = word_of(&tv);
         let here = || format!("class `{}` iter {i} word {word:#010x} (seed {seed:#x})", class.name);
         tally(step(&tv, &here)?, &mut compared, &mut reserved, &mut faulted);
     }
@@ -166,15 +217,8 @@ pub fn fuzz_fp_class(class: &FpClass, iters: u32, seed: u64) -> Result<FuzzRepor
     let (mut compared, mut reserved, mut faulted) = (0, 0, 0);
 
     for i in 0..iters {
-        let enc = (class.encode)(&mut rng);
-        let word = enc.word;
-        let mut tv = random_state(&mut rng);
-        tv.code = word.to_le_bytes().to_vec();
-        tv.init_v = Some(enc.init_v);
-        tv.init_fpcr = enc.fpcr;
-        for (reg, val) in &enc.gpr_seeds {
-            tv.init_x[*reg as usize] = *val;
-        }
+        let tv = vector_fp(class, &mut rng);
+        let word = word_of(&tv);
         let here = || format!("class `{}` iter {i} word {word:#010x} (seed {seed:#x})", class.name);
         tally(step(&tv, &here)?, &mut compared, &mut reserved, &mut faulted);
     }
@@ -189,29 +233,19 @@ pub fn fuzz_mem_class(class: &MemClass, iters: u32, seed: u64) -> Result<FuzzRep
     let (mut compared, mut reserved, mut faulted) = (0, 0, 0);
 
     for i in 0..iters {
-        let enc = (class.encode)(&mut rng);
-        let word = enc.word;
-        let mut tv = random_state(&mut rng);
-        tv.code = word.to_le_bytes().to_vec();
-        for (reg, val) in &enc.seeds {
-            if *reg == 31 {
-                tv.init_sp = *val;
-            } else {
-                tv.init_x[*reg as usize] = *val;
-            }
-        }
-        tv.init_data = Some(enc.data);
-        if !enc.init_v.is_empty() {
-            let mut v = [0u128; 32];
-            for (reg, val) in &enc.init_v {
-                v[*reg as usize] = *val;
-            }
-            tv.init_v = Some(v);
-        }
+        let tv = vector_mem(class, &mut rng);
+        let word = word_of(&tv);
         let here = || format!("class `{}` iter {i} word {word:#010x} (seed {seed:#x})", class.name);
         tally(step(&tv, &here)?, &mut compared, &mut reserved, &mut faulted);
     }
 
     Ok(FuzzReport { class: class.name.to_string(), iters, compared, reserved, faulted })
+}
+
+/// The 32-bit instruction word a prepared vector single-steps (its code's first
+/// four bytes), for failure-context messages.
+#[cfg(feature = "unicorn")]
+pub(crate) fn word_of(tv: &TestVector) -> u32 {
+    u32::from_le_bytes([tv.code[0], tv.code[1], tv.code[2], tv.code[3]])
 }
 
