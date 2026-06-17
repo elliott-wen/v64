@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 aarch64-cpu-state.workspace = true
+aarch64-decoder.workspace = true
 aarch64-interp.workspace = true
 
 # The JIT backend, used as a third differential runner (`run_jit`). Opt-in

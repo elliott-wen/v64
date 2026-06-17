@@ -36,15 +36,21 @@ pub(crate) fn decode(word: u32) -> Insn {
     // Exception generating: bits [31:24] == 1101_0100. opc = [23:21], LL = [1:0].
     if field(word, 24, 8) == 0b1101_0100 {
         let imm16 = field(word, 5, 16) as u16;
-        if field(word, 21, 3) == 0 {
-            match field(word, 0, 2) {
+        let opc = field(word, 21, 3);
+        let ll = field(word, 0, 2);
+        if opc == 0 {
+            match ll {
                 0b01 => return Insn::Svc { imm16 }, // SVC -> EL1
                 0b10 => return Insn::Hvc { imm16 }, // HVC -> PSCI conduit
                 0b11 => return Insn::Smc { imm16 }, // SMC -> PSCI conduit
                 _ => {}
             }
         }
-        return Insn::Unsupported { word }; // BRK/HLT/DCPS not implemented
+        // BRK #imm: opc=001, LL=00 — software breakpoint (debug exception).
+        if opc == 0b001 && ll == 0 {
+            return Insn::Brk { imm16 };
+        }
+        return Insn::Unsupported { word }; // HLT/DCPS not implemented
     }
     Insn::Unsupported { word }
 }

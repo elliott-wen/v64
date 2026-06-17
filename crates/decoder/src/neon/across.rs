@@ -1,4 +1,5 @@
-//! Advanced SIMD across-lanes: ADDV / SMAXV / UMAXV / SMINV / UMINV.
+//! Advanced SIMD across-lanes: ADDV / SADDLV / UADDLV / SMAXV / UMAXV / SMINV /
+//! UMINV.
 
 use crate::bits::field;
 use crate::insn::Insn;
@@ -13,6 +14,7 @@ pub(crate) fn decode(word: u32) -> Insn {
     let size_ok = size <= 2 && (size != 2 || q);
     let valid = size_ok
         && match opcode {
+            0b00011 => true, // SADDLV / UADDLV (widening add across)
             0b11011 => !u, // ADDV
             0b01010 | 0b11010 => true, // S/U MAXV, S/U MINV
             _ => false,

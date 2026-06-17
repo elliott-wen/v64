@@ -4,10 +4,6 @@
 use aarch64_cpu_state::CpuState;
 
 use crate::fp::{canon_d, canon_s, fmax_d, fmax_s, fmaxnm_d, fmaxnm_s, fmin_d, fmin_s, fminnm_d, fminnm_s};
-use crate::{
-    simd_indexed, simd_shift_imm, simd_three_diff, simd_three_same, simd_three_same_fp,
-    simd_two_reg_misc, simd_two_reg_misc_fp,
-};
 
 /// Zero every bit above the low `bits` of Vd.
 fn keep_low(cpu: &mut CpuState, rd: u8, bits: u32) {
@@ -27,10 +23,10 @@ pub(crate) fn three_same(
     if opcode >= 0x18 {
         let fpopcode = opcode | ((size >> 1) << 5) | (u8::from(u) << 6);
         let sz = size & 1 == 1;
-        simd_three_same_fp::exec(cpu, false, sz, fpopcode, rm, rn, rd);
+        super::three_same_fp::exec(cpu, false, sz, fpopcode, rm, rn, rd);
         keep_low(cpu, rd, if sz { 64 } else { 32 });
     } else {
-        simd_three_same::exec(cpu, false, u, size, opcode, rm, rn, rd);
+        super::three_same::exec(cpu, false, u, size, opcode, rm, rn, rd);
         keep_low(cpu, rd, 8u32 << size);
     }
     None
@@ -47,10 +43,10 @@ pub(crate) fn two_reg_misc(
     if matches!(opcode, 0xc..=0xf | 0x16..=0x1f) {
         let is_double = size & 1 == 1;
         let fpop = opcode | ((size >> 1) << 5) | (u8::from(u) << 6);
-        simd_two_reg_misc_fp::exec(cpu, false, is_double, fpop, rn, rd);
+        super::two_reg_misc_fp::exec(cpu, false, is_double, fpop, rn, rd);
         keep_low(cpu, rd, if is_double { 64 } else { 32 });
     } else {
-        simd_two_reg_misc::exec(cpu, false, u, size, opcode, rn, rd);
+        super::two_reg_misc::exec(cpu, false, u, size, opcode, rn, rd);
         keep_low(cpu, rd, 8u32 << size);
     }
     None
@@ -110,7 +106,7 @@ pub(crate) fn three_diff(
     rn: u8,
     rd: u8,
 ) -> Option<u64> {
-    simd_three_diff::exec(cpu, false, false, size, opcode, rm, rn, rd);
+    super::three_diff::exec(cpu, false, false, size, opcode, rm, rn, rd);
     keep_low(cpu, rd, 2 * (8u32 << size)); // wide result element
     None
 }
@@ -135,7 +131,7 @@ pub(crate) fn indexed(
     rn: u8,
     rd: u8,
 ) -> Option<u64> {
-    simd_indexed::exec(cpu, false, u, size, opcode, index, rm, rn, rd);
+    super::indexed::exec(cpu, false, u, size, opcode, index, rm, rn, rd);
     let key = 16 * u8::from(u) + opcode;
     let bits = match key {
         0x03 | 0x07 | 0x0b => 2 * (8u32 << size),     // long: SQDMLAL/SQDMLSL/SQDMULL
@@ -155,7 +151,7 @@ pub(crate) fn shift_imm(
     rn: u8,
     rd: u8,
 ) -> Option<u64> {
-    simd_shift_imm::exec(cpu, false, u, immh, immb, opcode, rn, rd);
+    super::shift_imm::exec(cpu, false, u, immh, immb, opcode, rn, rd);
     let size = 3 - (immh.leading_zeros() - 4); // highest set bit
     keep_low(cpu, rd, 8u32 << size);
     None

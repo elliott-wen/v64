@@ -21,6 +21,18 @@ pub(crate) fn exec(
     };
     let lanes = split(cpu.v[rn as usize], size, q);
 
+    // SADDLV/UADDLV: sum all lanes into a *double-width* scalar (no overflow).
+    if opcode == 0b00011 {
+        let sum: i128 = lanes
+            .iter()
+            .map(|&x| if u { i128::from(x & mask) } else { i128::from(sext(x)) })
+            .sum();
+        let rbits = ebits * 2;
+        let rmask = if rbits >= 64 { u64::MAX } else { (1u64 << rbits) - 1 };
+        cpu.v[rd as usize] = u128::from((sum as u64) & rmask);
+        return None;
+    }
+
     let result = match opcode {
         0b11011 => lanes.iter().fold(0u64, |a, &x| a.wrapping_add(x)) & mask, // ADDV
         0b01010 => lanes

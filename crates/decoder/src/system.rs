@@ -26,8 +26,16 @@ pub(crate) fn decode(word: u32) -> Insn {
             return Insn::Unsupported { word };
         }
         return match crn {
-            // Hints (NOP/YIELD/...) and barriers (DSB/DMB/ISB/CLREX): no-ops.
-            2 | 3 => Insn::Nop,
+            // Hint space (CRn=2): WFI/WFE are wait-for-interrupt/event — the
+            // machine fast-forwards over guest idle instead of busy-spinning, so
+            // they decode distinctly. The rest (NOP/YIELD/SEV/...) are no-ops.
+            2 => match (field(word, 8, 4), field(word, 5, 3)) {
+                (0, 2) => Insn::Wfe,
+                (0, 3) => Insn::Wfi,
+                _ => Insn::Nop,
+            },
+            // Barriers (DSB/DMB/ISB/CLREX): no-ops in a sequential interpreter.
+            3 => Insn::Nop,
             // MSR (immediate): SPSel / DAIFSet / DAIFClr.
             4 => Insn::MsrImm {
                 op1: field(word, 16, 3) as u8,
@@ -38,7 +46,23 @@ pub(crate) fn decode(word: u32) -> Insn {
         };
     }
 
-    // MRS (L=1) / MSR (L=0) register move.
+    // SYS/SYSL (op0=1): cache/TLB/address-translate maintenance. With no TLB or
+    // cache model these are no-ops — *except* DC ZVA, which architecturally zeros
+    // a block of memory and so must be modelled to keep guest memory correct.
+    if op0 == 1 {
+        let op1 = field(word, 16, 3);
+        let crm = field(word, 8, 4);
+        let op2 = field(word, 5, 3);
+        // DC ZVA: op1=011, CRn=0111, CRm=0100, op2=001 (L=0).
+        if l == 0 && op1 == 0b011 && crn == 0b0111 && crm == 0b0100 && op2 == 0b001 {
+            return Insn::DcZva { rt };
+        }
+        // TLBI / IC / other DC / AT: no architectural effect we model. A SYSL
+        // read (L=1) is rarer still; treat as a no-op (its Rt is left unchanged).
+        return Insn::Nop;
+    }
+
+    // MRS (L=1) / MSR (L=0) register move (op0 = 2 or 3).
     let key = sysreg_key(op0, field(word, 16, 3), crn, field(word, 8, 4), field(word, 5, 3));
     Insn::SysRegMove { read: l == 1, key, rt }
 }

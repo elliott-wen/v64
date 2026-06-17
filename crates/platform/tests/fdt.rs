@@ -23,6 +23,7 @@ fn sample_dtb() -> Vec<u8> {
         uart_irq: 33,
         bootargs: "console=ttyAMA0",
         initrd: Some((0x4800_0000, 0x4810_0000)),
+        virtio: &[(0x0a00_0000, 48)],
     })
 }
 

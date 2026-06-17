@@ -15,15 +15,19 @@ mod gic;
 mod loader;
 mod machine;
 mod uart;
+mod virtio;
 
 pub use board::{
     Board, DEFAULT_RAM_SIZE, DTB_LOAD, GICC_BASE, GICD_BASE, KERNEL_LOAD, RAM_BASE, UART_BASE,
-    UART_IRQ,
+    UART_IRQ, VIRTIO_BASE, VIRTIO_IRQ, VIRTIO_STRIDE,
 };
 pub use loader::{parse_image_header, BootLayout, ImageHeader};
-pub use bus::{Bus, MmioDevice};
+pub use bus::{Bus, DmaDevice, MmioDevice};
 pub use clock::{Clock, HostClock, DEFAULT_FREQ_HZ};
 pub use fdt::{virt_dtb, DtbConfig, FdtBuilder};
 pub use gic::{Gic, GicCpu, GicDist};
 pub use machine::Machine;
 pub use uart::{Uart, UartDevice};
+pub use virtio::{
+    InputKind, VirtioBlk, VirtioBlkMmio, VirtioGpu, VirtioGpuMmio, VirtioInput, VirtioInputMmio,
+};

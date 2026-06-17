@@ -6,6 +6,7 @@ use aarch64_cpu_state::CpuState;
 
 use crate::fp::{
     canon_d, canon_s, fmax_d, fmax_s, fmaxnm_d, fmaxnm_s, fmin_d, fmin_s, fminnm_d, fminnm_s,
+    mulx_d, mulx_s,
 };
 use crate::simd::{join, split};
 
@@ -135,30 +136,6 @@ fn pair_d(fpopcode: u8, xb: u64, yb: u64) -> u64 {
         0x7e => canon_d(fmin_d(a, b)),
         0x58 => canon_d(fmaxnm_d(a, b)),
         _ => canon_d(fminnm_d(a, b)),
-    }
-}
-
-/// FMULX: like FMUL, but 0*inf yields ±2.0 (sign = sign(a) xor sign(b)).
-fn mulx_s(a: f32, b: f32) -> f32 {
-    if (a == 0.0 && b.is_infinite()) || (a.is_infinite() && b == 0.0) {
-        if a.is_sign_negative() ^ b.is_sign_negative() {
-            -2.0
-        } else {
-            2.0
-        }
-    } else {
-        a * b
-    }
-}
-fn mulx_d(a: f64, b: f64) -> f64 {
-    if (a == 0.0 && b.is_infinite()) || (a.is_infinite() && b == 0.0) {
-        if a.is_sign_negative() ^ b.is_sign_negative() {
-            -2.0
-        } else {
-            2.0
-        }
-    } else {
-        a * b
     }
 }
 

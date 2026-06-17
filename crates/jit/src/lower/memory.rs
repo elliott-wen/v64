@@ -18,11 +18,16 @@ use crate::abi;
 /// LDR/STR, single register (integer or SIMD/FP), every addressing mode. The
 /// 128-bit-and-narrower vector forms are handled; structure loads fall back.
 pub(super) fn load_store(f: &mut Function, insn: &Insn, pc: u64, guest_base: u64) -> bool {
-    let Insn::LoadStore { size, is_load, signed, dst64, vec, rt, addr } = *insn else {
+    let Insn::LoadStore { size, is_load, signed, dst64, vec, unpriv, rt, addr } = *insn else {
         return false;
     };
     // Integer access widths are log2 0..=3; vector adds size 4 (the 128-bit Q).
     if size > 4 || (!vec && size > 3) {
+        return false;
+    }
+    // LDTR/STTR need an EL0 permission check the JIT's direct access can't do;
+    // fall back to the interpreter.
+    if unpriv {
         return false;
     }
 

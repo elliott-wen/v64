@@ -3,7 +3,7 @@
 
 use aarch64_cpu_state::CpuState;
 
-use crate::mem_access::{read, write};
+use crate::mem_access::{align_check, read, write};
 use crate::memory::GuestMem;
 
 pub(crate) fn exec(
@@ -16,6 +16,9 @@ pub(crate) fn exec(
     rt: u8,
 ) -> Option<u64> {
     let addr = cpu.read_gpr(rn, true);
+    if align_check(cpu, addr, 1 << size, true) {
+        return None; // unaligned atomic: Alignment Data Abort
+    }
 
     // QEMU/TCG implements these as fetch-ops at the access width: both the
     // memory value and Rs are zero-extended from `size` bytes, the op runs at
@@ -26,6 +29,9 @@ pub(crate) fn exec(
     let w = 8u32 << size;
     let mask = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
     let old = read(cpu, mem, addr, size);
+    if cpu.pending_abort.is_some() {
+        return None; // faulted on the load; retry the whole RMW after the handler
+    }
     let s = cpu.read_gpr(rs, false) & mask;
 
     let new = match op {
@@ -40,6 +46,9 @@ pub(crate) fn exec(
         _ => s,                                                // SWP
     };
     write(cpu, mem, addr, size, new);
+    if cpu.pending_abort.is_some() {
+        return None; // faulted on the store; retry (Rt not yet written)
+    }
 
     // The old value (zero-extended) is returned to Rt.
     if size == 3 {

@@ -4,11 +4,17 @@
 //! round-to-nearest, so arithmetic NaN results are the canonical default NaN and
 //! rounding matches Rust's native `f32`/`f64`. Bit-manipulating ops (FMOV, FABS,
 //! FNEG) operate on the raw bits and are *not* NaN-canonicalized.
+//!
+//! Rounding-mode helpers live in the `round` submodule (`fp/round.rs`).
+
+pub(crate) mod flags;
+pub(crate) mod round;
 
 use aarch64_cpu_state::{CpuState, Flags};
 
 use crate::cond::eval_cond;
-use crate::fp_round::{round_f32, round_f64, Mode};
+use crate::fp::flags::Op;
+use crate::fp::round::{round_f32, round_f64, Mode};
 
 const DEFAULT_NAN_32: u32 = 0x7FC0_0000;
 const DEFAULT_NAN_64: u64 = 0x7FF8_0000_0000_0000;
@@ -52,8 +58,11 @@ pub(crate) fn dp1(cpu: &mut CpuState, ftype: u8, opcode: u8, rn: u8, rd: u8) -> 
             0 => write_s(cpu, rd, x.to_bits()),               // FMOV
             1 => write_s(cpu, rd, x.to_bits() & 0x7fff_ffff), // FABS (clear sign)
             2 => write_s(cpu, rd, x.to_bits() ^ 0x8000_0000), // FNEG (flip sign)
-            3 => write_s(cpu, rd, canon_s(x.sqrt())),         // FSQRT
-            5 => write_d(cpu, rd, canon_d(f64::from(x))),     // FCVT single->double
+            3 => { let r = x.sqrt(); flags::sqrt(cpu, x, r); write_s(cpu, rd, canon_s(r)); } // FSQRT
+            5 => { // FCVT single->double: always exact; only an SNaN is Invalid.
+                if is_snan_s(x) { flags::raise(cpu, flags::IOC); }
+                write_d(cpu, rd, canon_d(f64::from(x)));
+            }
             _ => write_s(cpu, rd, canon_s(round_f32(x, frint_mode(opcode)))), // FRINT*
         }
     } else {
@@ -62,8 +71,21 @@ pub(crate) fn dp1(cpu: &mut CpuState, ftype: u8, opcode: u8, rn: u8, rd: u8) -> 
             0 => write_d(cpu, rd, x.to_bits()),
             1 => write_d(cpu, rd, x.to_bits() & 0x7fff_ffff_ffff_ffff),
             2 => write_d(cpu, rd, x.to_bits() ^ 0x8000_0000_0000_0000),
-            3 => write_d(cpu, rd, canon_d(x.sqrt())),
-            4 => write_s(cpu, rd, canon_s(x as f32)), // FCVT double->single
+            3 => { let r = x.sqrt(); flags::sqrt(cpu, x, r); write_d(cpu, rd, canon_d(r)); } // FSQRT
+            4 => { // FCVT double->single: can overflow / underflow / lose precision.
+                let r = x as f32;
+                let mut f = 0u64;
+                if is_snan_d(x) {
+                    f |= flags::IOC;
+                } else if r.is_infinite() && x.is_finite() {
+                    f |= flags::OFC | flags::IXC;
+                } else if r.is_finite() && f64::from(r) != x {
+                    f |= flags::IXC;
+                    if r != 0.0 && r.is_subnormal() { f |= flags::UFC; }
+                }
+                flags::raise(cpu, f);
+                write_s(cpu, rd, canon_s(r));
+            }
             _ => write_d(cpu, rd, canon_d(round_f64(x, frint_mode(opcode)))), // FRINT*
         }
     }
@@ -92,21 +114,38 @@ pub(crate) fn dp2(
 ) -> Option<u64> {
     if single(ftype) {
         let (a, b) = (read_s(cpu, rn), read_s(cpu, rm));
-        let bits = if opcode == 0b1000 {
-            // FNMUL negates the *canonicalized* product, so the sign flip
-            // applies even when the result is the default NaN.
-            canon_s(a * b) ^ 0x8000_0000
-        } else {
-            canon_s(dp2_op_s(opcode, a, b))
+        let r = match opcode {
+            0b0000 | 0b1000 => { let p = a * b; flags::binop(cpu, Op::Mul, a, b, p); p } // FMUL/FNMUL
+            0b0001 => { let q = a / b; flags::binop(cpu, Op::Div, a, b, q); q }
+            0b0010 => { let s = a + b; flags::binop(cpu, Op::Add, a, b, s); s }
+            0b0011 => { let d = a - b; flags::binop(cpu, Op::Sub, a, b, d); d }
+            // FMAX/FMIN/FMAXNM/FMINNM: a selection — only a signaling-NaN operand
+            // raises Invalid; the chosen value is exact.
+            _ => {
+                if is_snan_s(a) || is_snan_s(b) {
+                    flags::raise(cpu, flags::IOC);
+                }
+                dp2_op_s(opcode, a, b)
+            }
         };
+        // FNMUL negates the *canonicalized* product (sign flip even on default NaN).
+        let bits = if opcode == 0b1000 { canon_s(r) ^ 0x8000_0000 } else { canon_s(r) };
         write_s(cpu, rd, bits);
     } else {
         let (a, b) = (read_d(cpu, rn), read_d(cpu, rm));
-        let bits = if opcode == 0b1000 {
-            canon_d(a * b) ^ 0x8000_0000_0000_0000
-        } else {
-            canon_d(dp2_op_d(opcode, a, b))
+        let r = match opcode {
+            0b0000 | 0b1000 => { let p = a * b; flags::binop(cpu, Op::Mul, a, b, p); p }
+            0b0001 => { let q = a / b; flags::binop(cpu, Op::Div, a, b, q); q }
+            0b0010 => { let s = a + b; flags::binop(cpu, Op::Add, a, b, s); s }
+            0b0011 => { let d = a - b; flags::binop(cpu, Op::Sub, a, b, d); d }
+            _ => {
+                if is_snan_d(a) || is_snan_d(b) {
+                    flags::raise(cpu, flags::IOC);
+                }
+                dp2_op_d(opcode, a, b)
+            }
         };
+        let bits = if opcode == 0b1000 { canon_d(r) ^ 0x8000_0000_0000_0000 } else { canon_d(r) };
         write_d(cpu, rd, bits);
     }
     None
@@ -140,41 +179,53 @@ fn dp2_op_d(opcode: u8, a: f64, b: f64) -> f64 {
 }
 
 /// A signaling NaN has the top fraction bit clear.
-fn is_snan_s(f: f32) -> bool {
-    f.is_nan() && f.to_bits() & 0x0040_0000 == 0
+macro_rules! is_snan {
+    ($name:ident, $t:ty, $top_frac_bit:expr) => {
+        /// A signaling NaN has the top fraction bit clear.
+        fn $name(f: $t) -> bool {
+            f.is_nan() && f.to_bits() & $top_frac_bit == 0
+        }
+    };
 }
-fn is_snan_d(f: f64) -> bool {
-    f.is_nan() && f.to_bits() & 0x0008_0000_0000_0000 == 0
-}
+is_snan!(is_snan_s, f32, 0x0040_0000);
+is_snan!(is_snan_d, f64, 0x0008_0000_0000_0000);
 
-// FMAX/FMIN propagate any NaN; signed zeros are ordered (+0 > -0).
-pub(crate) fn fmax_s(a: f32, b: f32) -> f32 {
-    if a.is_nan() || b.is_nan() { f32::NAN } else { a.max(b) }
+macro_rules! min_max {
+    ($t:ty, $snan:ident, $max:ident, $min:ident, $maxnm:ident, $minnm:ident) => {
+        // FMAX/FMIN propagate any NaN; signed zeros are ordered (+0 > -0).
+        pub(crate) fn $max(a: $t, b: $t) -> $t {
+            if a.is_nan() || b.is_nan() { <$t>::NAN } else { a.max(b) }
+        }
+        pub(crate) fn $min(a: $t, b: $t) -> $t {
+            if a.is_nan() || b.is_nan() { <$t>::NAN } else { a.min(b) }
+        }
+        // FMAXNM/FMINNM use the other operand for a *quiet* NaN; a signaling NaN
+        // raises Invalid and yields a NaN result (default NaN under DN=1).
+        pub(crate) fn $maxnm(a: $t, b: $t) -> $t {
+            if $snan(a) || $snan(b) { <$t>::NAN } else { a.max(b) }
+        }
+        pub(crate) fn $minnm(a: $t, b: $t) -> $t {
+            if $snan(a) || $snan(b) { <$t>::NAN } else { a.min(b) }
+        }
+    };
 }
-pub(crate) fn fmin_s(a: f32, b: f32) -> f32 {
-    if a.is_nan() || b.is_nan() { f32::NAN } else { a.min(b) }
-}
-pub(crate) fn fmax_d(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) }
-}
-pub(crate) fn fmin_d(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) }
-}
+min_max!(f32, is_snan_s, fmax_s, fmin_s, fmaxnm_s, fminnm_s);
+min_max!(f64, is_snan_d, fmax_d, fmin_d, fmaxnm_d, fminnm_d);
 
-// FMAXNM/FMINNM treat a *quiet* NaN as "use the other operand", but a signaling
-// NaN raises Invalid and yields a NaN result (default NaN under DN=1).
-pub(crate) fn fmaxnm_s(a: f32, b: f32) -> f32 {
-    if is_snan_s(a) || is_snan_s(b) { f32::NAN } else { a.max(b) }
+macro_rules! mulx {
+    ($name:ident, $t:ty) => {
+        /// FMULX: like multiply, but `0*inf` (either sign) yields ±2.0, not NaN.
+        pub(crate) fn $name(a: $t, b: $t) -> $t {
+            if (a == 0.0 && b.is_infinite()) || (a.is_infinite() && b == 0.0) {
+                if a.is_sign_negative() ^ b.is_sign_negative() { -2.0 } else { 2.0 }
+            } else {
+                a * b
+            }
+        }
+    };
 }
-pub(crate) fn fminnm_s(a: f32, b: f32) -> f32 {
-    if is_snan_s(a) || is_snan_s(b) { f32::NAN } else { a.min(b) }
-}
-pub(crate) fn fmaxnm_d(a: f64, b: f64) -> f64 {
-    if is_snan_d(a) || is_snan_d(b) { f64::NAN } else { a.max(b) }
-}
-pub(crate) fn fminnm_d(a: f64, b: f64) -> f64 {
-    if is_snan_d(a) || is_snan_d(b) { f64::NAN } else { a.min(b) }
-}
+mulx!(mulx_s, f32);
+mulx!(mulx_d, f64);
 
 pub(crate) fn compare(
     cpu: &mut CpuState,
@@ -239,16 +290,40 @@ pub(crate) fn dp3(
         let n = if o1 { -n } else { n }; // FNMADD/FNMSUB negate Rn
         let a = if o1 { -a } else { a }; // FNMADD/FNMSUB negate Ra
         let n = if o0 { -n } else { n }; // FMSUB/FNMADD negate the product
-        write_s(cpu, rd, canon_s(n.mul_add(m, a)));
+        let r = n.mul_add(m, a);
+        fma_flags_s(cpu, n, m, a, r);
+        write_s(cpu, rd, canon_s(r));
     } else {
         let (n, m, a) = (read_d(cpu, rn), read_d(cpu, rm), read_d(cpu, ra));
         let n = if o1 { -n } else { n };
         let a = if o1 { -a } else { a };
         let n = if o0 { -n } else { n };
-        write_d(cpu, rd, canon_d(n.mul_add(m, a)));
+        let r = n.mul_add(m, a);
+        fma_flags_d(cpu, n, m, a, r);
+        write_d(cpu, rd, canon_d(r));
     }
     None
 }
+
+// FMADD-family flags (best-effort): Invalid for a signaling-NaN operand or a
+// NaN produced from finite inputs (e.g. `inf*0`), and Overflow when a finite
+// product+addend rounds to infinity. Inexact for the fused op is not modelled
+// (it would need extended precision) — acceptable for an observational flag.
+macro_rules! fma_flags {
+    ($name:ident, $t:ty, $snan:ident) => {
+        fn $name(cpu: &mut CpuState, n: $t, m: $t, a: $t, r: $t) {
+            if $snan(n) || $snan(m) || $snan(a)
+                || (r.is_nan() && !n.is_nan() && !m.is_nan() && !a.is_nan())
+            {
+                flags::raise(cpu, flags::IOC);
+            } else if r.is_infinite() && n.is_finite() && m.is_finite() && a.is_finite() {
+                flags::raise(cpu, flags::OFC | flags::IXC);
+            }
+        }
+    };
+}
+fma_flags!(fma_flags_s, f32, is_snan_s);
+fma_flags!(fma_flags_d, f64, is_snan_d);
 
 /// FCCMP/FCCMPE: compare if `cond` holds, else set NZCV to the immediate.
 #[allow(clippy::too_many_arguments)]
@@ -323,6 +398,7 @@ pub(crate) fn cvt_int(
             let signed = opcode == 0b010;
             let gpr = cpu.read_gpr(rn, false);
             int_to_fp(cpu, rd, is_single, sf, signed, gpr);
+            flags::i2f(cpu, i2f_exact(gpr, sf, signed, is_single));
         }
         // FCVT{N,P,M,Z}{S,U}: FP -> integer with the rmode rounding (saturating).
         0b000 | 0b001 => {
@@ -333,28 +409,44 @@ pub(crate) fn cvt_int(
                 0b10 => Mode::Floor,
                 _ => Mode::Trunc,
             };
+            fcvt_to_int_flags(cpu, rn, is_single, sf, signed, mode);
             let result = fp_to_int(cpu, rn, is_single, sf, signed, mode);
             write_gpr(cpu, rd, sf, result);
         }
         // FCVTAS / FCVTAU: tie-away rounding.
         0b100 | 0b101 => {
             let signed = opcode == 0b100;
+            fcvt_to_int_flags(cpu, rn, is_single, sf, signed, Mode::Away);
             let result = fp_to_int(cpu, rn, is_single, sf, signed, Mode::Away);
             write_gpr(cpu, rd, sf, result);
         }
         // FMOV gpr <-> fpr.
         0b110 => {
-            // FP -> GPR.
-            let bits = if sf { cpu.v[rn as usize] as u64 } else { u64::from(cpu.v[rn as usize] as u32) };
-            write_gpr(cpu, rd, sf, bits);
+            if ftype == 0b10 {
+                // FMOV Xd, Vn.D[1]: high 64 bits of the vector register -> Xd.
+                let hi = (cpu.v[rn as usize] >> 64) as u64;
+                write_gpr(cpu, rd, true, hi);
+            } else {
+                // FP -> GPR (W<->S / X<->D).
+                let bits =
+                    if sf { cpu.v[rn as usize] as u64 } else { u64::from(cpu.v[rn as usize] as u32) };
+                write_gpr(cpu, rd, sf, bits);
+            }
         }
         0b111 => {
-            // GPR -> FP.
-            let gpr = cpu.read_gpr(rn, false);
-            if sf {
-                write_d(cpu, rd, gpr);
+            if ftype == 0b10 {
+                // FMOV Vd.D[1], Xn: Xn -> high 64 bits of Vd, low 64 preserved.
+                let gpr = cpu.read_gpr(rn, false);
+                let lo = cpu.v[rd as usize] & u128::from(u64::MAX);
+                cpu.v[rd as usize] = lo | (u128::from(gpr) << 64);
             } else {
-                write_s(cpu, rd, gpr as u32);
+                // GPR -> FP (W<->S / X<->D).
+                let gpr = cpu.read_gpr(rn, false);
+                if sf {
+                    write_d(cpu, rd, gpr);
+                } else {
+                    write_s(cpu, rd, gpr as u32);
+                }
             }
         }
         _ => {}
@@ -383,6 +475,123 @@ fn int_to_fp(cpu: &mut CpuState, rd: u8, is_single: bool, sf: bool, signed: bool
 /// FP -> integer, rounding per `mode` then saturating. Rust's saturating `as`
 /// casts match the ARM semantics (NaN -> 0, out-of-range -> saturate). Rounding
 /// is done on the source-width float to match QEMU.
+/// Convert between FP and fixed-point. `opcode`: 010=SCVTF,011=UCVTF (fixed int
+/// -> FP), 000=FCVTZS,001=FCVTZU (FP -> fixed int, toward zero). The fraction
+/// has `64 - scale` bits, i.e. scaling by 2^±fbits (an exact power of two).
+pub(crate) fn cvt_fixed(
+    cpu: &mut CpuState,
+    sf: bool,
+    ftype: u8,
+    opcode: u8,
+    scale: u8,
+    rn: u8,
+    rd: u8,
+) -> Option<u64> {
+    let is_single = single(ftype);
+    let fbits = 64 - i32::from(scale); // 1..=64
+
+    match opcode {
+        // SCVTF / UCVTF: integer (with `fbits` fraction bits) -> FP.
+        0b010 | 0b011 => {
+            let signed = opcode == 0b010;
+            let gpr = cpu.read_gpr(rn, false);
+            // Scaling by 2^-fbits is an exact power of two, so exactness is just
+            // whether the raw integer fits the mantissa.
+            flags::i2f(cpu, i2f_exact(gpr, sf, signed, is_single));
+            if is_single {
+                let iv = int_as_f32(gpr, sf, signed);
+                write_s(cpu, rd, (iv * 2f32.powi(-fbits)).to_bits());
+            } else {
+                let iv = int_as_f64(gpr, sf, signed);
+                write_d(cpu, rd, (iv * 2f64.powi(-fbits)).to_bits());
+            }
+        }
+        // FCVTZS / FCVTZU: FP -> integer (with `fbits` fraction bits), toward zero.
+        0b000 | 0b001 => {
+            let signed = opcode == 0b000;
+            let scaled = if is_single {
+                f64::from(read_s(cpu, rn)) * 2f64.powi(fbits)
+            } else {
+                read_d(cpu, rn) * 2f64.powi(fbits)
+            };
+            let (lo, hi) = int_bounds(sf, signed);
+            flags::f2i(cpu, scaled, lo, hi, scaled == scaled.trunc());
+            // Rust float->int casts truncate toward zero and saturate (NaN -> 0).
+            let result = match (sf, signed) {
+                (true, true) => scaled as i64 as u64,
+                (true, false) => scaled as u64,
+                (false, true) => (scaled as i32 as u32) as u64,
+                (false, false) => u64::from(scaled as u32),
+            };
+            write_gpr(cpu, rd, sf, result);
+        }
+        _ => {}
+    }
+    None
+}
+
+fn int_as_f32(gpr: u64, sf: bool, signed: bool) -> f32 {
+    if signed {
+        if sf {
+            gpr as i64 as f32
+        } else {
+            (gpr as i32) as f32
+        }
+    } else if sf {
+        gpr as f32
+    } else {
+        (gpr as u32) as f32
+    }
+}
+
+fn int_as_f64(gpr: u64, sf: bool, signed: bool) -> f64 {
+    if signed {
+        if sf {
+            gpr as i64 as f64
+        } else {
+            i64::from(gpr as i32) as f64
+        }
+    } else if sf {
+        gpr as f64
+    } else {
+        f64::from(gpr as u32)
+    }
+}
+
+/// Representable-exactly bounds `[lo, hi)` of an integer type, as `f64`.
+fn int_bounds(sf: bool, signed: bool) -> (f64, f64) {
+    match (sf, signed) {
+        (true, true) => (-(2f64.powi(63)), 2f64.powi(63)),
+        (true, false) => (0.0, 2f64.powi(64)),
+        (false, true) => (-(2f64.powi(31)), 2f64.powi(31)),
+        (false, false) => (0.0, 2f64.powi(32)),
+    }
+}
+
+/// `true` iff the integer in `gpr` is exactly representable in the target float
+/// (its significant-bit span fits the mantissa) — i.e. SCVTF/UCVTF is exact.
+fn i2f_exact(gpr: u64, sf: bool, signed: bool, is_single: bool) -> bool {
+    let mag = if signed {
+        let iv = if sf { gpr as i64 } else { i64::from(gpr as i32) };
+        iv.unsigned_abs()
+    } else if sf {
+        gpr
+    } else {
+        u64::from(gpr as u32)
+    };
+    let mant_bits = if is_single { 24 } else { 53 };
+    mag == 0 || (mag >> mag.trailing_zeros()) < (1u64 << mant_bits)
+}
+
+/// Raise FP->integer conversion flags: Invalid for NaN / out-of-range (the cast
+/// saturates), else Inexact when the source had a fractional part.
+fn fcvt_to_int_flags(cpu: &mut CpuState, rn: u8, is_single: bool, sf: bool, signed: bool, mode: Mode) {
+    let src = if is_single { f64::from(read_s(cpu, rn)) } else { read_d(cpu, rn) };
+    let rounded = round_f64(src, mode);
+    let (lo, hi) = int_bounds(sf, signed);
+    flags::f2i(cpu, src, lo, hi, src == rounded);
+}
+
 fn fp_to_int(cpu: &CpuState, rn: u8, is_single: bool, sf: bool, signed: bool, mode: Mode) -> u64 {
     let val = if is_single {
         f64::from(round_f32(read_s(cpu, rn), mode))

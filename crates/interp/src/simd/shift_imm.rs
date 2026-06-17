@@ -4,7 +4,6 @@
 use aarch64_cpu_state::CpuState;
 
 use crate::simd::{join, split};
-use crate::{simd_shift_fp, simd_shift_long, simd_shift_narrow};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec(
@@ -19,10 +18,10 @@ pub(crate) fn exec(
 ) -> Option<u64> {
     match opcode {
         0b10000 | 0b10001 | 0b10010 | 0b10011 => {
-            return simd_shift_narrow::exec(cpu, q, u, immh, immb, opcode, rn, rd)
+            return super::shift_narrow::exec(cpu, q, u, immh, immb, opcode, rn, rd)
         }
-        0b10100 => return simd_shift_long::exec(cpu, q, u, immh, immb, rn, rd),
-        0b11100 | 0b11111 => return simd_shift_fp::exec(cpu, q, u, immh, immb, opcode, rn, rd),
+        0b10100 => return super::shift_long::exec(cpu, q, u, immh, immb, rn, rd),
+        0b11100 | 0b11111 => return super::shift_fp::exec(cpu, q, u, immh, immb, opcode, rn, rd),
         _ => {}
     }
 

@@ -4,7 +4,7 @@
 
 use aarch64_cpu_state::CpuState;
 
-use crate::fp::{canon_d, canon_s};
+use crate::fp::{canon_d, canon_s, mulx_d, mulx_s};
 use crate::simd::{join, split};
 
 #[allow(clippy::too_many_arguments)]
@@ -218,25 +218,3 @@ fn lane_d(key: u8, xb: u64, vb: u64, db: u64) -> u64 {
     }
 }
 
-fn mulx_s(a: f32, b: f32) -> f32 {
-    if (a == 0.0 && b.is_infinite()) || (a.is_infinite() && b == 0.0) {
-        if a.is_sign_negative() ^ b.is_sign_negative() {
-            -2.0
-        } else {
-            2.0
-        }
-    } else {
-        a * b
-    }
-}
-fn mulx_d(a: f64, b: f64) -> f64 {
-    if (a == 0.0 && b.is_infinite()) || (a.is_infinite() && b == 0.0) {
-        if a.is_sign_negative() ^ b.is_sign_negative() {
-            -2.0
-        } else {
-            2.0
-        }
-    } else {
-        a * b
-    }
-}

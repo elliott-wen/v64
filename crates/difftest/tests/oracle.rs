@@ -121,6 +121,64 @@ fn matches_unicorn_stxr_alone_fails() {
     assert_matches_oracle(&tv);
 }
 
+#[test]
+fn matches_unicorn_ldapr() {
+    // ldapr x1, [x0]  (0xf8bfc001) — load-acquire RCpc; in our model a plain load
+    let mut tv = TestVector::new(&0xf8bf_c001u32.to_le_bytes());
+    tv.init_x[0] = DATA_BASE;
+    let mut data = vec![0u8; DATA_SIZE];
+    data[..8].copy_from_slice(&0x0123_4567_89ab_cdefu64.to_le_bytes());
+    tv.init_data = Some(data);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_ldxp_stxp_x() {
+    // ldxp x1,x2,[x0] ; stxp w3,x1,x2,[x0]  — 64-bit exclusive pair round-trip
+    let ldxp = 0xc87f_0801u32; // ldxp x1, x2, [x0]
+    let stxp = 0xc823_0801u32; // stxp w3, x1, x2, [x0]
+    let mut code = ldxp.to_le_bytes().to_vec();
+    code.extend(stxp.to_le_bytes());
+    let mut tv = TestVector::new(&code);
+    tv.init_x[0] = DATA_BASE;
+    tv.init_data = Some(vec![0x5au8; DATA_SIZE]);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_casp_success() {
+    // casp w0,w1,w2,w3,[x4]  (0x08207c82): x0:x1 match memory, so it swaps in x2:x3
+    let mut tv = TestVector::new(&0x0820_7c82u32.to_le_bytes());
+    tv.init_x[4] = DATA_BASE;
+    // Memory holds two words {0x11111111, 0x22222222}; the compare pair matches.
+    tv.init_x[0] = 0x1111_1111;
+    tv.init_x[1] = 0x2222_2222;
+    tv.init_x[2] = 0xaaaa_aaaa;
+    tv.init_x[3] = 0xbbbb_bbbb;
+    let mut data = vec![0u8; DATA_SIZE];
+    data[..4].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+    data[4..8].copy_from_slice(&0x2222_2222u32.to_le_bytes());
+    tv.init_data = Some(data);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_casp_fail() {
+    // casp with a non-matching compare pair: memory is left unchanged, x0:x1 get
+    // the (unchanged) old memory values.
+    let mut tv = TestVector::new(&0x0820_7c82u32.to_le_bytes());
+    tv.init_x[4] = DATA_BASE;
+    tv.init_x[0] = 0xdead_beef; // does not match memory
+    tv.init_x[1] = 0xfeed_face;
+    tv.init_x[2] = 0xaaaa_aaaa;
+    tv.init_x[3] = 0xbbbb_bbbb;
+    let mut data = vec![0u8; DATA_SIZE];
+    data[..4].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+    data[4..8].copy_from_slice(&0x2222_2222u32.to_le_bytes());
+    tv.init_data = Some(data);
+    assert_matches_oracle(&tv);
+}
+
 // System registers: write then read TPIDR_EL0 and confirm the round-trip
 // matches Unicorn (foundation of the system-mode model).
 fn sysreg_word(read: bool, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32, rt: u32) -> u32 {
@@ -170,5 +228,61 @@ fn matches_unicorn_sp_el0_roundtrip() {
     let mut tv = TestVector::new(&code);
     tv.init_x[0] = 0x1234_5678_9abc_def0;
     tv.count = 2;
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_fmov_high_half() {
+    // fmov x0, v3.d[1] : high 64 bits of V3 -> X0
+    let mut tv = TestVector::new(&0x9eae_0060u32.to_le_bytes());
+    let mut v = [0u128; 32];
+    v[3] = 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00;
+    tv.init_v = Some(v);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_fmov_to_high_half() {
+    // fmov v0.d[1], x3 : X3 -> high 64 of V0, low 64 preserved
+    let mut tv = TestVector::new(&0x9eaf_0060u32.to_le_bytes()).with_x(3, 0xcafe_f00d_1234_5678);
+    let mut v = [0u128; 32];
+    v[0] = 0x0000_0000_0000_0000_dead_beef_dead_beef; // low half should survive
+    tv.init_v = Some(v);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_scvtf_fixed() {
+    // scvtf d0, w0, #2 : W0=5 as fixed (2 frac bits) -> 1.25
+    let mut tv = TestVector::new(&0x1e42_f800u32.to_le_bytes()).with_x(0, 5);
+    tv.init_v = Some([0u128; 32]);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_ucvtf_fixed_single() {
+    // ucvtf s0, w0, #4 : W0=20 as fixed (4 frac bits) -> 1.25
+    let mut tv = TestVector::new(&0x1e03_f000u32.to_le_bytes()).with_x(0, 20);
+    tv.init_v = Some([0u128; 32]);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_fcvtzs_fixed() {
+    // fcvtzs w0, d0, #2 : D0=1.25 -> *4 -> 5
+    let mut tv = TestVector::new(&0x1e58_f800u32.to_le_bytes());
+    let mut v = [0u128; 32];
+    v[0] = u128::from(1.25f64.to_bits());
+    tv.init_v = Some(v);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_fcvtzu_fixed_x() {
+    // fcvtzu x0, d0, #3 : D0=2.5 -> *8 -> 20
+    let mut tv = TestVector::new(&0x9e59_f400u32.to_le_bytes());
+    let mut v = [0u128; 32];
+    v[0] = u128::from(2.5f64.to_bits());
+    tv.init_v = Some(v);
     assert_matches_oracle(&tv);
 }

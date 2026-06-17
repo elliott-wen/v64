@@ -181,6 +181,8 @@ pub struct DtbConfig<'a> {
     pub bootargs: &'a str,
     /// `(start, end)` physical addresses of an initramfs, if any.
     pub initrd: Option<(u64, u64)>,
+    /// `(base, irq)` of each virtio-mmio transport to advertise.
+    pub virtio: &'a [(u64, u32)],
 }
 
 /// Build a device tree for the emulated `virt`-style board.
@@ -272,6 +274,15 @@ pub fn virt_dtb(cfg: &DtbConfig) -> Vec<u8> {
     fdt.prop_cells("clocks", &[PHANDLE_CLK, PHANDLE_CLK]);
     fdt.prop_strlist("clock-names", &["uartclk", "apb_pclk"]);
     fdt.end_node();
+
+    // /virtio_mmio@... : one transport node per attached virtio device.
+    for &(base, irq) in cfg.virtio {
+        fdt.begin_node(&format!("virtio_mmio@{base:x}"));
+        fdt.prop_strlist("compatible", &["virtio,mmio"]);
+        fdt.prop("reg", &reg_2_2(base, 0x200));
+        fdt.prop_cells("interrupts", &[GIC_SPI, irq - 32, IRQ_LEVEL_HIGH]);
+        fdt.end_node();
+    }
 
     fdt.end_node(); // root
     fdt.finish()

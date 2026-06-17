@@ -16,6 +16,14 @@ pub const UART_BASE: u64 = 0x0900_0000;
 /// PL011 (UART0) interrupt: SPI 1 == GIC interrupt ID 33.
 pub const UART_IRQ: u32 = 33;
 
+/// virtio-mmio device region: up to 8 transports at [`VIRTIO_STRIDE`] spacing,
+/// each with its own SPI starting at [`VIRTIO_IRQ`]. (Sits below RAM and the
+/// other devices, like the low end of QEMU virt's virtio area.)
+pub const VIRTIO_BASE: u64 = 0x0a00_0000;
+pub const VIRTIO_STRIDE: u64 = 0x200;
+/// First virtio interrupt: GIC ID 48 == SPI 16. Device *n* uses `VIRTIO_IRQ + n`.
+pub const VIRTIO_IRQ: u32 = 48;
+
 /// Default kernel load offset when the `Image` header gives none — the
 /// conventional 512 KiB text offset from the 2 MiB-aligned RAM base.
 pub const KERNEL_LOAD: u64 = RAM_BASE + 0x8_0000;
@@ -30,11 +38,49 @@ pub const DEFAULT_RAM_SIZE: usize = 1 << 30;
 /// PSTATE.DAIF all-masked, as required on kernel entry.
 const DAIF_MASKED: u8 = 0b1111;
 
+/// Pack a system register's (op0,op1,CRn,CRm,op2) tuple into the flat key the
+/// interpreter's sysreg map uses (matches `aarch64_decoder::sysreg_key`).
+const fn sys_key(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
+    (op0 << 16) | (op1 << 12) | (crn << 8) | (crm << 4) | op2
+}
+
+/// Seed the read-only ID / cache registers with values describing this core:
+/// an ARMv8.0-A AArch64 implementation with FP + AdvSIMD, 64-byte cache lines,
+/// and a 64-byte DC ZVA block. Reset leaves them zero, which advertises 4-byte
+/// cache lines and a 4-byte DC ZVA block — correct but pathologically slow for
+/// the kernel's cache/clear-page loops, and a poor `/proc/cpuinfo`.
+///
+/// Feature registers we don't set stay zero, i.e. "extension absent" — a clean
+/// v8.0 baseline (no LSE/crypto/SVE/PAuth), matching what the interpreter
+/// actually implements, so the guest never takes a code path we can't honour.
+fn reset_id_registers(cpu: &mut CpuState) {
+    let regs = [
+        // MIDR_EL1: implementer ARM (0x41), architecture "use ID regs" (0xF),
+        // synthetic part number 0xD00 so the kernel matches no errata range.
+        (sys_key(3, 0, 0, 0, 0), 0x410f_d000),
+        // MPIDR_EL1: RES1 bit[31], single core, affinity 0.
+        (sys_key(3, 0, 0, 0, 5), 0x8000_0000),
+        // ID_AA64PFR0_EL1: EL0/EL1 = AArch64-only (0b0001); FP & AdvSIMD = 0
+        // (implemented). All other fields 0 (GICv2 via MMIO, no SVE, etc.).
+        (sys_key(3, 0, 0, 4, 0), 0x0000_0000_0000_0011),
+        // CTR_EL0: 64-byte I/D cache lines, 64-byte CWG/ERG (Cortex-A53 value).
+        (sys_key(3, 3, 0, 0, 1), 0x8444_8004),
+        // DCZID_EL0: DC ZVA permitted (DZP=0), block size 4<<4 = 64 bytes.
+        (sys_key(3, 3, 0, 0, 7), 0x0000_0004),
+    ];
+    for (key, val) in regs {
+        cpu.sysregs.insert(key, val);
+    }
+}
+
 /// A fully-wired single-core `virt` machine plus the UART handle (so the host
 /// can drain console output / feed input).
 pub struct Board {
     pub machine: Machine,
     pub uart: Uart,
+    /// `(base, irq)` of each mapped virtio-mmio transport, in slot order — used
+    /// to emit their device-tree nodes.
+    virtio_slots: Vec<(u64, u32)>,
 }
 
 impl Board {
@@ -55,8 +101,50 @@ impl Board {
         bus.map(GICC_BASE, 0x10000, Box::new(gic.cpu_interface()));
         bus.map(UART_BASE, 0x1000, Box::new(uart.device()));
 
-        let machine = Machine::new(CpuState::new(), bus, gic);
-        Board { machine, uart }
+        let mut cpu = CpuState::new();
+        reset_id_registers(&mut cpu);
+        let machine = Machine::new(cpu, bus, gic);
+        Board { machine, uart, virtio_slots: Vec::new() }
+    }
+
+    /// Allocate the next virtio-mmio slot (`base`, `irq`) and record it for the
+    /// device tree.
+    fn next_virtio_slot(&mut self) -> (u64, u32) {
+        let n = self.virtio_slots.len() as u64;
+        let slot = (VIRTIO_BASE + n * VIRTIO_STRIDE, VIRTIO_IRQ + n as u32);
+        self.virtio_slots.push(slot);
+        slot
+    }
+
+    /// Attach a virtio-blk disk backed by `image` (appears as `/dev/vda`). Maps
+    /// its MMIO window, registers it for DMA polling, and adds its FDT node.
+    /// Returns the handle (e.g. to flush the image back to a file on shutdown).
+    pub fn attach_disk(&mut self, image: Vec<u8>) -> crate::VirtioBlk {
+        let (base, irq) = self.next_virtio_slot();
+        let blk = crate::VirtioBlk::new(self.machine.gic.clone(), irq, image);
+        self.machine.bus.map(base, VIRTIO_STRIDE, Box::new(blk.device()));
+        self.machine.add_dma(Box::new(blk.clone()));
+        blk
+    }
+
+    /// Attach a virtio-input device (keyboard or mouse). The returned handle's
+    /// `key`/`motion` methods inject host input events to the guest.
+    pub fn attach_input(&mut self, kind: crate::InputKind) -> crate::VirtioInput {
+        let (base, irq) = self.next_virtio_slot();
+        let dev = crate::VirtioInput::new(self.machine.gic.clone(), irq, kind);
+        self.machine.bus.map(base, VIRTIO_STRIDE, Box::new(dev.device()));
+        self.machine.add_dma(Box::new(dev.clone()));
+        dev
+    }
+
+    /// Attach a virtio-gpu with one `width` x `height` scanout. The returned
+    /// handle's `take_frame` yields the composed image for the host to display.
+    pub fn attach_gpu(&mut self, width: u32, height: u32) -> crate::VirtioGpu {
+        let (base, irq) = self.next_virtio_slot();
+        let dev = crate::VirtioGpu::new(self.machine.gic.clone(), irq, width, height);
+        self.machine.bus.map(base, VIRTIO_STRIDE, Box::new(dev.device()));
+        self.machine.add_dma(Box::new(dev.clone()));
+        dev
     }
 
     /// Bytes of RAM the board was built with.
@@ -77,6 +165,7 @@ impl Board {
             uart_irq: UART_IRQ,
             bootargs,
             initrd,
+            virtio: &self.virtio_slots,
         })
     }
 

@@ -34,16 +34,29 @@ pub fn run(cpu: &mut CpuState, mem: &mut dyn GuestMem, until: u64, count: usize)
         }
 
         let pc = cpu.pc;
-        let fetch_pa = crate::mmu::translate(cpu, mem, pc);
+        // Fetch translation can fault (Instruction Abort) — e.g. demand-paged
+        // user text. Vector to the handler and retry the fetch after ERET.
+        let fetch_pa = match crate::mmu::translate(cpu, mem, pc, crate::mmu::Access::Exec, cpu.el) {
+            Ok(pa) => pa,
+            Err(fsc) => {
+                cpu.pc = crate::exception::inst_abort(cpu, pc, fsc);
+                executed += 1;
+                continue;
+            }
+        };
         let word = mem.read_u32(fetch_pa);
         let insn = decode(word);
         if let Insn::Unsupported { word } = insn {
             return StopReason::Unsupported { pc, word };
         }
-        // A taken branch returns its target; otherwise advance sequentially.
-        cpu.pc = match execute(cpu, mem, insn, pc) {
-            Some(target) => target,
-            None => pc.wrapping_add(4),
+        let next = execute(cpu, mem, insn, pc);
+        // A data access may have raised a translation fault mid-instruction;
+        // take the Data Abort instead of advancing (the instruction retries).
+        cpu.pc = if let Some(abort) = cpu.pending_abort.take() {
+            crate::exception::data_abort(cpu, pc, abort)
+        } else {
+            // A taken branch returns its target; otherwise advance sequentially.
+            next.unwrap_or_else(|| pc.wrapping_add(4))
         };
         executed += 1;
     }
@@ -67,15 +80,23 @@ pub enum Step {
 /// deliberately independent of it so it stays the untouched reference loop.
 pub fn step(cpu: &mut CpuState, mem: &mut dyn GuestMem) -> Step {
     let pc = cpu.pc;
-    let fetch_pa = crate::mmu::translate(cpu, mem, pc);
+    let fetch_pa = match crate::mmu::translate(cpu, mem, pc, crate::mmu::Access::Exec, cpu.el) {
+        Ok(pa) => pa,
+        Err(fsc) => {
+            cpu.pc = crate::exception::inst_abort(cpu, pc, fsc);
+            return Step::Next(cpu.pc);
+        }
+    };
     let word = mem.read_u32(fetch_pa);
     let insn = decode(word);
     if let Insn::Unsupported { word } = insn {
         return Step::Unsupported { pc, word };
     }
-    cpu.pc = match execute(cpu, mem, insn, pc) {
-        Some(target) => target,
-        None => pc.wrapping_add(4),
+    let next = execute(cpu, mem, insn, pc);
+    cpu.pc = if let Some(abort) = cpu.pending_abort.take() {
+        crate::exception::data_abort(cpu, pc, abort)
+    } else {
+        next.unwrap_or_else(|| pc.wrapping_add(4))
     };
     Step::Next(cpu.pc)
 }

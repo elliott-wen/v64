@@ -1,4 +1,30 @@
-//! Shared SIMD lane helpers: split a V register into elements and reassemble.
+//! Advanced SIMD / NEON. This module holds the shared lane helpers (below); the
+//! per-encoding-class executors live in the `simd/` subdirectory.
+
+pub(crate) mod across;
+pub(crate) mod aes;
+pub(crate) mod copy;
+pub(crate) mod dup;
+pub(crate) mod ext;
+pub(crate) mod indexed;
+pub(crate) mod ldst_struct;
+pub(crate) mod mod_imm;
+pub(crate) mod permute;
+pub(crate) mod scalar;
+pub(crate) mod sha;
+pub(crate) mod shift_fp;
+pub(crate) mod shift_imm;
+pub(crate) mod shift_long;
+pub(crate) mod shift_narrow;
+pub(crate) mod tbl;
+pub(crate) mod three_diff;
+pub(crate) mod three_same;
+pub(crate) mod three_same_extra;
+pub(crate) mod three_same_fp;
+pub(crate) mod two_reg_long;
+pub(crate) mod two_reg_misc;
+pub(crate) mod two_reg_misc_fp;
+pub(crate) mod two_reg_narrow;
 
 /// Split the low (Q ? 128 : 64) bits of `val` into `8<<size`-bit lanes,
 /// each zero-extended into a u64.

@@ -12,6 +12,10 @@ use std::time::Instant;
 pub const DEFAULT_FREQ_HZ: u64 = 62_500_000;
 
 /// A source of monotonic counter ticks. The value must never decrease.
+///
+/// The clock only *reads* time; it never blocks. Idle handling (waiting through
+/// guest WFI) is the host loop's job — see [`crate::Machine::idle_for`] — so the
+/// machine stays portable to single-threaded hosts (a browser can't sleep).
 pub trait Clock {
     /// Current counter value, in timer ticks (at the configured frequency).
     fn now(&self) -> u64;

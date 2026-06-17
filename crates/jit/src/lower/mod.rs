@@ -47,7 +47,8 @@ pub(crate) use terminator::lower_terminator;
 /// Try to lower a non-terminator instruction. On success advances the image PC.
 pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, guest_base: u64) -> bool {
     match *insn {
-        Insn::Nop => {}
+        // NOP and PRFM (prefetch hint) have no architectural effect.
+        Insn::Nop | Insn::Prfm => {}
         Insn::MoveWide { sf, opc, hw, imm16, rd } => arith::move_wide(f, sf, opc, hw, imm16, rd),
         Insn::LogicalImm { sf, opc, imm, rn, rd } => {
             arith::logical(f, sf, opc, BOp::Imm(imm), rn, rd, opc != 3);

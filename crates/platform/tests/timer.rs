@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use aarch64_cpu_state::CpuState;
 use aarch64_decoder::sysreg_key;
-use aarch64_interp::{GuestMem, Memory};
+use aarch64_interp::{GuestMem, Memory, StopReason};
 use aarch64_platform::{Bus, Clock, Gic, Machine};
 
 const GICD: u64 = 0x0800_0000;
@@ -107,4 +107,59 @@ fn clock_sampling_is_throttled_to_the_interval() {
         m.cpu.pc == IRQ_VECTOR
     });
     assert!(fired, "timer fires within one sampling interval");
+}
+
+const WFI: u32 = 0xd503_207f;
+const B_BACK_ONE: u32 = 0x17ff_ffff; // B .-4
+
+/// WFI fast-forward: a guest idling in `WFI; b .-4` must not busy-spin. The
+/// machine doesn't block — it returns an idle deadline; the host (here, the
+/// test) advances time to it and re-enters. The PPI then fires and the IRQ wakes
+/// the guest into its handler. This models the browser driver (no `sleep`).
+#[test]
+fn wfi_fast_forwards_to_the_timer_deadline() {
+    let ticks = Rc::new(Cell::new(0u64));
+
+    let gic = Gic::new();
+    let mut bus = Bus::new(Memory::new(MAIN, 0x1_0000));
+    bus.map(GICD, 0x10000, Box::new(gic.distributor()));
+    bus.map(GICC, 0x10000, Box::new(gic.cpu_interface()));
+    bus.write_u32(GICD + 0x100, 1 << PPI_VIRT_TIMER);
+    bus.write_u32(GICD + 0x000, 1);
+    bus.write_u32(GICC + 0x000, 1);
+    bus.write_u32(GICC + 0x004, 0xF0);
+
+    // main: WFI, then branch back to the WFI (a tight idle loop).
+    bus.ram_mut().write(MAIN, &WFI.to_le_bytes());
+    bus.ram_mut().write(MAIN + 4, &B_BACK_ONE.to_le_bytes());
+    bus.ram_mut().write(IRQ_VECTOR, &B_SELF.to_le_bytes()); // handler spins
+
+    let mut cpu = CpuState::new(); // EL1h, IRQs unmasked
+    cpu.pc = MAIN;
+    cpu.sysregs.insert(vbar_key(), VBAR);
+    cpu.sysregs.insert(cntv_ctl(), 1);
+    cpu.sysregs.insert(cntv_cval(), 1000); // deadline well within the idle cap
+
+    let mut m = Machine::with_clock(cpu, bus, gic, Box::new(ManualClock(ticks.clone())), FREQ);
+
+    // Drive like the host loop: re-enter run() until the handler is reached,
+    // advancing time to the reported idle deadline (the "wait" a real host does).
+    let mut woke = false;
+    for _ in 0..16 {
+        match m.run(IRQ_VECTOR, 10_000_000) {
+            StopReason::UntilReached => {
+                woke = true;
+                break;
+            }
+            StopReason::CountReached => {
+                if let Some(target) = m.idle_until_tick() {
+                    ticks.set(target); // host honours the idle deadline
+                }
+            }
+            other => panic!("unexpected stop: {other:?}"),
+        }
+    }
+    assert!(woke, "WFI idle eventually delivered the timer IRQ");
+    assert_eq!(m.cpu.pc, IRQ_VECTOR, "woke into the IRQ handler");
+    assert!(ticks.get() >= 1000, "clock fast-forwarded to the deadline, not spun");
 }

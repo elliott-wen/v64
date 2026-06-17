@@ -6,33 +6,46 @@
 
 use crate::bits::field;
 use crate::insn::Insn;
-use crate::{fp_ccmp, fp_compare, fp_csel, fp_cvt, fp_dp1, fp_dp2, fp_dp3, fp_imm};
+
+mod ccmp;
+mod compare;
+mod csel;
+mod cvt;
+mod dp1;
+mod dp2;
+mod dp3;
+mod fixed;
+mod imm;
 
 pub(crate) fn decode(word: u32) -> Insn {
     // 3-source (FMADD/FMSUB/FNMADD/FNMSUB) shares op0 but has bits[28:24]=11111.
     if field(word, 24, 5) == 0b11111 {
-        return fp_dp3::decode(word);
+        return dp3::decode(word);
     }
-    if field(word, 24, 5) != 0b11110 || field(word, 21, 1) != 1 {
+    if field(word, 24, 5) != 0b11110 {
         return Insn::Unsupported { word };
+    }
+    // bit21=0 selects FP<->fixed-point conversion; bit21=1 is everything else.
+    if field(word, 21, 1) == 0 {
+        return fixed::decode(word);
     }
     match field(word, 10, 2) {
         0b00 => {
             if field(word, 10, 6) == 0b000000 {
-                fp_cvt::decode(word) // convert FP<->int / FMOV gpr
+                cvt::decode(word) // convert FP<->int / FMOV gpr
             } else if field(word, 10, 5) == 0b10000 {
-                fp_dp1::decode(word) // 1-source
+                dp1::decode(word) // 1-source
             } else if field(word, 10, 4) == 0b1000 {
-                fp_compare::decode(word)
+                compare::decode(word)
             } else if field(word, 10, 3) == 0b100 {
-                fp_imm::decode(word)
+                imm::decode(word)
             } else {
                 Insn::Unsupported { word }
             }
         }
-        0b10 => fp_dp2::decode(word), // 2-source
-        0b11 => fp_csel::decode(word),
-        _ => fp_ccmp::decode(word), // 0b01 = FP conditional compare
+        0b10 => dp2::decode(word), // 2-source
+        0b11 => csel::decode(word),
+        _ => ccmp::decode(word), // 0b01 = FP conditional compare
     }
 }
 

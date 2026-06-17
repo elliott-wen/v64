@@ -11,13 +11,8 @@ use crate::memory::GuestMem;
 use crate::{
     add_sub_carry, add_sub_ext_reg, add_sub_imm, add_sub_shifted_reg, bitfield, branch_imm,
     branch_reg, compare_branch, cond_branch, cond_compare, cond_select, data_proc_1src,
-    data_proc_2src, data_proc_3src, exception, extract, fp, ldst, ldst_atomic, ldst_cas, ldst_excl,
-    ldst_pair, logical_imm, logical_reg, move_wide, pc_rel, psci, simd_aes, simd_across, simd_copy,
-    simd_dup,
-    simd_ext, simd_indexed, simd_ldst_struct, simd_sha, simd_tbl,
-    simd_mod_imm, simd_permute, simd_scalar, simd_shift_imm, simd_three_diff, simd_three_same,
-    simd_three_same_extra, simd_three_same_fp, simd_two_reg_misc, simd_two_reg_misc_fp, system,
-    test_branch,
+    data_proc_2src, data_proc_3src, exception, extract, fp, 
+    ldst, logical_imm, logical_reg, move_wide, pc_rel, psci, simd, system, test_branch,
 };
 
 pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc: u64) -> Option<u64> {
@@ -66,18 +61,25 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc
             test_branch::exec(cpu, bit, negate, rt, offset, pc)
         }
         Insn::BranchReg { opc, rn } => branch_reg::exec(cpu, opc, rn, pc),
-        Insn::LoadStore { size, is_load, signed, dst64, vec, rt, addr } => {
-            ldst::exec(cpu, mem, size, is_load, signed, dst64, vec, rt, addr, pc)
+        Insn::LoadStore { size, is_load, signed, dst64, vec, unpriv, rt, addr } => {
+            ldst::exec(cpu, mem, size, is_load, signed, dst64, vec, unpriv, rt, addr, pc)
         }
         Insn::LoadStorePair { is_load, signed, width8, vec, vesize, rt, rt2, rn, offset, index } => {
-            ldst_pair::exec(cpu, mem, is_load, signed, width8, vec, vesize, rt, rt2, rn, offset, index)
+            ldst::pair::exec(cpu, mem, is_load, signed, width8, vec, vesize, rt, rt2, rn, offset, index)
         }
         Insn::AtomicRmw { size, op, rs, rn, rt } => {
-            ldst_atomic::exec(cpu, mem, size, op, rs, rn, rt)
+            ldst::atomic::exec(cpu, mem, size, op, rs, rn, rt)
         }
-        Insn::CompareSwap { size, rs, rn, rt } => ldst_cas::exec(cpu, mem, size, rs, rn, rt),
-        Insn::LoadExclusive { size, rt, rn } => ldst_excl::load(cpu, mem, size, rt, rn),
-        Insn::StoreExclusive { size, rs, rt, rn } => ldst_excl::store(cpu, mem, size, rs, rt, rn),
+        Insn::CompareSwap { size, rs, rn, rt } => ldst::cas::exec(cpu, mem, size, rs, rn, rt),
+        Insn::LoadExclusive { size, rt, rn } => ldst::excl::load(cpu, mem, size, rt, rn),
+        Insn::StoreExclusive { size, rs, rt, rn } => ldst::excl::store(cpu, mem, size, rs, rt, rn),
+        Insn::LoadExclusivePair { size, rt, rt2, rn } => {
+            ldst::excl::load_pair(cpu, mem, size, rt, rt2, rn)
+        }
+        Insn::StoreExclusivePair { size, rs, rt, rt2, rn } => {
+            ldst::excl::store_pair(cpu, mem, size, rs, rt, rt2, rn)
+        }
+        Insn::CompareSwapPair { sz, rs, rn, rt } => ldst::cas::cas_pair(cpu, mem, sz, rs, rn, rt),
         Insn::FpDataProc1 { ftype, opcode, rn, rd } => fp::dp1(cpu, ftype, opcode, rn, rd),
         Insn::FpDataProc2 { ftype, opcode, rm, rn, rd } => fp::dp2(cpu, ftype, opcode, rm, rn, rd),
         Insn::FpDataProc3 { ftype, o1, o0, rm, ra, rn, rd } => {
@@ -94,85 +96,88 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc
             fp::cvt_int(cpu, sf, ftype, rmode, opcode, rn, rd)
         }
         Insn::FpImm { ftype, imm8, rd } => fp::imm(cpu, ftype, imm8, rd),
+        Insn::FpCvtFixed { sf, ftype, opcode, scale, rn, rd } => {
+            fp::cvt_fixed(cpu, sf, ftype, opcode, scale, rn, rd)
+        }
         Insn::SimdThreeSame { q, u, size, opcode, rm, rn, rd } => {
-            simd_three_same::exec(cpu, q, u, size, opcode, rm, rn, rd)
+            simd::three_same::exec(cpu, q, u, size, opcode, rm, rn, rd)
         }
         Insn::SimdThreeSameFp { q, sz, fpopcode, rm, rn, rd } => {
-            simd_three_same_fp::exec(cpu, q, sz, fpopcode, rm, rn, rd)
+            simd::three_same_fp::exec(cpu, q, sz, fpopcode, rm, rn, rd)
         }
         Insn::SimdThreeDiff { q, u, size, opcode, rm, rn, rd } => {
-            simd_three_diff::exec(cpu, q, u, size, opcode, rm, rn, rd)
+            simd::three_diff::exec(cpu, q, u, size, opcode, rm, rn, rd)
         }
         Insn::SimdIndexed { q, u, size, opcode, index, rm, rn, rd } => {
-            simd_indexed::exec(cpu, q, u, size, opcode, index, rm, rn, rd)
+            simd::indexed::exec(cpu, q, u, size, opcode, index, rm, rn, rd)
         }
         Insn::SimdTableLookup { q, is_tbx, len, rm, rn, rd } => {
-            simd_tbl::exec(cpu, q, is_tbx, len, rm, rn, rd)
+            simd::tbl::exec(cpu, q, is_tbx, len, rm, rn, rd)
         }
-        Insn::CryptoAes { opcode, rn, rd } => simd_aes::exec(cpu, opcode, rn, rd),
-        Insn::CryptoSha3 { opcode, rm, rn, rd } => simd_sha::three_reg(cpu, opcode, rm, rn, rd),
-        Insn::CryptoSha2 { opcode, rn, rd } => simd_sha::two_reg(cpu, opcode, rn, rd),
+        Insn::CryptoAes { opcode, rn, rd } => simd::aes::exec(cpu, opcode, rn, rd),
+        Insn::CryptoSha3 { opcode, rm, rn, rd } => simd::sha::three_reg(cpu, opcode, rm, rn, rd),
+        Insn::CryptoSha2 { opcode, rn, rd } => simd::sha::two_reg(cpu, opcode, rn, rd),
         Insn::SimdThreeSameExtra { q, u, size, opcode, rm, rn, rd } => {
-            simd_three_same_extra::exec(cpu, q, u, size, opcode, rm, rn, rd)
+            simd::three_same_extra::exec(cpu, q, u, size, opcode, rm, rn, rd)
         }
         Insn::SimdLdStMulti { is_load, q, postidx, rm, rn, rt, size, rpt, selem } => {
-            simd_ldst_struct::multi(cpu, mem, is_load, q, postidx, rm, rn, rt, size, rpt, selem)
+            simd::ldst_struct::multi(cpu, mem, is_load, q, postidx, rm, rn, rt, size, rpt, selem)
         }
         Insn::SimdLdStSingle { is_load, replicate, postidx, rm, rn, rt, size, selem, index, q } => {
-            simd_ldst_struct::single(
+            simd::ldst_struct::single(
                 cpu, mem, is_load, replicate, postidx, rm, rn, rt, size, selem, index, q,
             )
         }
         Insn::SimdScalarThreeSame { u, size, opcode, rm, rn, rd } => {
-            simd_scalar::three_same(cpu, u, size, opcode, rm, rn, rd)
+            simd::scalar::three_same(cpu, u, size, opcode, rm, rn, rd)
         }
         Insn::SimdScalarTwoRegMisc { u, size, opcode, rn, rd } => {
-            simd_scalar::two_reg_misc(cpu, u, size, opcode, rn, rd)
+            simd::scalar::two_reg_misc(cpu, u, size, opcode, rn, rd)
         }
         Insn::SimdScalarPairwise { u, size, opcode, rn, rd } => {
-            simd_scalar::pairwise(cpu, u, size, opcode, rn, rd)
+            simd::scalar::pairwise(cpu, u, size, opcode, rn, rd)
         }
         Insn::SimdScalarThreeDiff { size, opcode, rm, rn, rd } => {
-            simd_scalar::three_diff(cpu, size, opcode, rm, rn, rd)
+            simd::scalar::three_diff(cpu, size, opcode, rm, rn, rd)
         }
-        Insn::SimdScalarCopy { imm5, rn, rd } => simd_scalar::copy(cpu, imm5, rn, rd),
+        Insn::SimdScalarCopy { imm5, rn, rd } => simd::scalar::copy(cpu, imm5, rn, rd),
         Insn::SimdScalarIndexed { u, size, opcode, index, rm, rn, rd } => {
-            simd_scalar::indexed(cpu, u, size, opcode, index, rm, rn, rd)
+            simd::scalar::indexed(cpu, u, size, opcode, index, rm, rn, rd)
         }
         Insn::SimdScalarShiftImm { u, immh, immb, opcode, rn, rd } => {
-            simd_scalar::shift_imm(cpu, u, immh, immb, opcode, rn, rd)
+            simd::scalar::shift_imm(cpu, u, immh, immb, opcode, rn, rd)
         }
         Insn::SimdAcrossLanes { q, u, size, opcode, rn, rd } => {
-            simd_across::exec(cpu, q, u, size, opcode, rn, rd)
+            simd::across::exec(cpu, q, u, size, opcode, rn, rd)
         }
         Insn::SimdTwoRegMisc { q, u, size, opcode, rn, rd } => {
-            simd_two_reg_misc::exec(cpu, q, u, size, opcode, rn, rd)
+            simd::two_reg_misc::exec(cpu, q, u, size, opcode, rn, rd)
         }
         Insn::SimdTwoRegMiscFp { q, sz, fpop, rn, rd } => {
-            simd_two_reg_misc_fp::exec(cpu, q, sz, fpop, rn, rd)
+            simd::two_reg_misc_fp::exec(cpu, q, sz, fpop, rn, rd)
         }
         Insn::SimdModImm { q, op, cmode, imm8, rd } => {
-            simd_mod_imm::exec(cpu, q, op, cmode, imm8, rd)
+            simd::mod_imm::exec(cpu, q, op, cmode, imm8, rd)
         }
-        Insn::SimdDupGeneral { q, size, rn, rd } => simd_dup::exec(cpu, q, size, rn, rd),
+        Insn::SimdDupGeneral { q, size, rn, rd } => simd::dup::exec(cpu, q, size, rn, rd),
         Insn::SimdDupElement { q, size, index, rn, rd } => {
-            simd_copy::dup_element(cpu, q, size, index, rn, rd)
+            simd::copy::dup_element(cpu, q, size, index, rn, rd)
         }
         Insn::SimdInsGeneral { size, index, rn, rd } => {
-            simd_copy::ins_general(cpu, size, index, rn, rd)
+            simd::copy::ins_general(cpu, size, index, rn, rd)
         }
         Insn::SimdInsElement { size, dst, src, rn, rd } => {
-            simd_copy::ins_element(cpu, size, dst, src, rn, rd)
+            simd::copy::ins_element(cpu, size, dst, src, rn, rd)
         }
         Insn::SimdMovToGpr { signed, dst64, size, index, vn, rd } => {
-            simd_copy::mov_to_gpr(cpu, signed, dst64, size, index, vn, rd)
+            simd::copy::mov_to_gpr(cpu, signed, dst64, size, index, vn, rd)
         }
         Insn::SimdZipTrn { q, size, opcode, rm, rn, rd } => {
-            simd_permute::exec(cpu, q, size, opcode, rm, rn, rd)
+            simd::permute::exec(cpu, q, size, opcode, rm, rn, rd)
         }
-        Insn::SimdExt { q, imm4, rm, rn, rd } => simd_ext::exec(cpu, q, imm4, rm, rn, rd),
+        Insn::SimdExt { q, imm4, rm, rn, rd } => simd::ext::exec(cpu, q, imm4, rm, rn, rd),
         Insn::SimdShiftImm { q, u, immh, immb, opcode, rn, rd } => {
-            simd_shift_imm::exec(cpu, q, u, immh, immb, opcode, rn, rd)
+            simd::shift_imm::exec(cpu, q, u, immh, immb, opcode, rn, rd)
         }
         Insn::SysRegMove { read, key, rt } => system::exec(cpu, read, key, rt),
         Insn::MsrImm { op1, op2, crm } => exception::msr_imm(cpu, op1, op2, crm),
@@ -183,7 +188,19 @@ pub(crate) fn execute(cpu: &mut CpuState, mem: &mut dyn GuestMem, insn: Insn, pc
             None
         }
         Insn::Eret => exception::eret(cpu),
-        Insn::Nop => None,
+        Insn::Brk { imm16 } => exception::brk(cpu, imm16, pc),
+        Insn::DcZva { rt } => {
+            crate::mem_access::dc_zva(cpu, mem, rt);
+            None
+        }
+        // PRFM is a hint with no architectural effect — execute as a no-op.
+        Insn::Nop | Insn::Prfm => None,
+        // WFI/WFE retire as a NOP here; the flag lets the machine sleep through
+        // guest idle rather than busy-spinning. The pure run loop ignores it.
+        Insn::Wfi | Insn::Wfe => {
+            cpu.wfi = true;
+            None
+        }
         Insn::Unsupported { .. } => unreachable!("filtered in run()"),
     }
 }

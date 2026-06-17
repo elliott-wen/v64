@@ -106,6 +106,26 @@ pub(crate) fn write(cpu: &mut CpuState, key: u32, val: u64) -> bool {
     }
 }
 
+/// The earliest count value at which an *enabled* timer will next fire, if any
+/// timer is enabled. The machine uses this to sleep until the next timer
+/// interrupt while the guest is in WFI, instead of busy-spinning. A masked timer
+/// (IMASK set) still counts toward the deadline — WFI wakes on the pending
+/// interrupt regardless of the mask.
+#[must_use]
+pub fn next_deadline(cpu: &CpuState) -> Option<u64> {
+    let mut deadline: Option<u64> = None;
+    for (ctl, cval) in [
+        (key_cntv_ctl(), key_cntv_cval()),
+        (key_cntp_ctl(), key_cntp_cval()),
+    ] {
+        if get(cpu, ctl) & 1 != 0 {
+            let c = get(cpu, cval);
+            deadline = Some(deadline.map_or(c, |d| d.min(c)));
+        }
+    }
+    deadline
+}
+
 /// Set the timer frequency (`CNTFRQ_EL0`, Hz). Called once at machine init.
 pub fn set_frequency(cpu: &mut CpuState, hz: u64) {
     cpu.sysregs.insert(key_cntfrq(), hz);

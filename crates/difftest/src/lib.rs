@@ -13,6 +13,7 @@
 mod fuzz;
 #[cfg(feature = "jit")]
 mod jit_run;
+pub mod mmu_test;
 mod ours;
 mod rng;
 mod snapshot;
@@ -47,4 +48,6 @@ mod oracle;
 #[cfg(feature = "unicorn")]
 pub use fuzz::{fuzz_class, fuzz_fp_class, fuzz_mem_class};
 #[cfg(feature = "unicorn")]
-pub use oracle::{assert_matches_oracle, run_unicorn, run_unicorn_outcome, Outcome};
+pub use oracle::{
+    assert_matches_oracle, run_unicorn, run_unicorn_mmu, run_unicorn_outcome, MmuOutcome, Outcome,
+};

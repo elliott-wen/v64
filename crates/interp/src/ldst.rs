@@ -2,7 +2,14 @@
 //!
 //! The decoder normalizes each encoding class into an [`AddrMode`]; this routine
 //! computes the effective address (and any base writeback), then performs the
-//! sized, optionally sign-extending load or the sized store.
+//! sized, optionally sign-extending load or the sized store. The other
+//! load/store classes (pairs, exclusives, atomics, compare-and-swap) live in the
+//! sibling submodules below.
+
+pub(crate) mod atomic;
+pub(crate) mod cas;
+pub(crate) mod excl;
+pub(crate) mod pair;
 
 use aarch64_cpu_state::CpuState;
 use aarch64_decoder::AddrMode;
@@ -19,6 +26,7 @@ pub(crate) fn exec(
     signed: bool,
     dst64: bool,
     vec: bool,
+    unpriv: bool,
     rt: u8,
     addr: AddrMode,
     pc: u64,
@@ -29,18 +37,35 @@ pub(crate) fn exec(
         // SIMD/FP register access: `size` is log2 bytes (0..=4). Loads zero the
         // rest of the V register; no sign extension.
         if is_load {
-            cpu.v[rt as usize] = mem_access::read_vec(cpu, mem, ea, size);
+            let val = mem_access::read_vec(cpu, mem, ea, size);
+            if cpu.pending_abort.is_some() {
+                return None; // faulted: commit nothing; the instruction retries
+            }
+            cpu.v[rt as usize] = val;
         } else {
-            mem_access::write_vec(cpu, mem, ea, size, cpu.v[rt as usize]);
+            let val = cpu.v[rt as usize];
+            mem_access::write_vec(cpu, mem, ea, size, val);
+            if cpu.pending_abort.is_some() {
+                return None;
+            }
         }
-        if let Some((rn, new_base)) = writeback {
-            cpu.write_gpr(rn, true, new_base);
-        }
+        writeback_base(cpu, writeback);
         return None;
     }
 
     if is_load {
-        let raw = mem_access::read(cpu, mem, ea, size);
+        // LDTR (`unpriv`) is permission-checked at EL0 even from EL1.
+        let raw = if unpriv {
+            mem_access::read_unpriv(cpu, mem, ea, size)
+        } else {
+            mem_access::read(cpu, mem, ea, size)
+        };
+        // A faulting load must NOT write its destination: the value is bogus, and
+        // if the destination doubles as the base register (e.g. `ldr x9, [x9]`)
+        // clobbering it would corrupt the address when the instruction retries.
+        if cpu.pending_abort.is_some() {
+            return None;
+        }
         let value = if signed {
             let bits = 8u32 << size;
             let sh = 64 - bits;
@@ -55,14 +80,33 @@ pub(crate) fn exec(
             cpu.write_gpr_w(rt, false, value);
         }
     } else {
-        // Store the low `1<<size` bytes of Rt (ZR reads as 0).
-        mem_access::write(cpu, mem, ea, size, cpu.read_gpr(rt, false));
+        // Store the low `1<<size` bytes of Rt (ZR reads as 0). STTR (`unpriv`)
+        // is permission-checked at EL0.
+        let val = cpu.read_gpr(rt, false);
+        if unpriv {
+            mem_access::write_unpriv(cpu, mem, ea, size, val);
+        } else {
+            mem_access::write(cpu, mem, ea, size, val);
+        }
+        if cpu.pending_abort.is_some() {
+            return None;
+        }
     }
 
+    writeback_base(cpu, writeback);
+    None
+}
+
+/// Apply a pre/post-index base writeback — but only if the access did not fault.
+/// On a translation fault the instruction is retried after the handler, so the
+/// writeback must not have already been committed (it would double-apply).
+fn writeback_base(cpu: &mut CpuState, writeback: Option<(u8, u64)>) {
+    if cpu.pending_abort.is_some() {
+        return;
+    }
     if let Some((rn, new_base)) = writeback {
         cpu.write_gpr(rn, true, new_base);
     }
-    None
 }
 
 /// Returns `(effective_address, optional base writeback)`.

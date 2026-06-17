@@ -24,6 +24,7 @@ pub(crate) fn decode(word: u32) -> Insn {
         signed,
         dst64,
         vec,
+        unpriv: false,
         rt: field(word, 0, 5) as u8,
         addr: AddrMode::PreIndex { rn: field(word, 5, 5) as u8, imm: sfield(word, 12, 9) },
     }

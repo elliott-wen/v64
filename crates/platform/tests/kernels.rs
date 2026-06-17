@@ -16,8 +16,9 @@ fn mmu_translates_a_store_through_a_block_mapping() {
     // where each entry maps a 1 GiB block.
     let pt_base = RAM_BASE + 0x2000;
     // Block descriptor for the RAM gigabyte: output 0x4000_0000, valid (bit0),
-    // block (bit1 clear).
-    let desc = RAM_BASE | 1;
+    // block (bit1 clear), access flag set (bit10) so the walk doesn't take an
+    // access-flag fault. AP=00 => EL1 read/write (the mini-kernel runs at EL1).
+    let desc = RAM_BASE | 1 | (1 << 10);
 
     let mut a = Asm::new();
     a.load_imm64(1, pt_base);
@@ -115,4 +116,26 @@ fn full_irq_handler_cycle_with_iar_eoir_eret() {
     let (stop, board) = boot_and_run(&a.image(), |_| {});
     assert_eq!(stop, StopReason::PoweredOff);
     assert_eq!(board.uart.take_tx(), b"IM", "handler ran, then main resumed");
+}
+
+/// ID/cache registers: the board seeds realistic ARMv8.0 values at reset, so a
+/// guest MRS sees 64-byte cache lines, a 64-byte DC ZVA block, a single-core
+/// MPIDR, and an AArch64 FP+AdvSIMD feature profile — not the bare-reset zeros.
+#[test]
+fn id_registers_read_seeded_values() {
+    let mut a = Asm::new();
+    a.mrs(10, (3, 3, 0, 0, 1)); // CTR_EL0
+    a.mrs(11, (3, 3, 0, 0, 7)); // DCZID_EL0
+    a.mrs(12, (3, 0, 0, 0, 5)); // MPIDR_EL1
+    a.mrs(13, (3, 0, 0, 4, 0)); // ID_AA64PFR0_EL1
+    a.mrs(14, (3, 0, 0, 0, 0)); // MIDR_EL1
+    a.power_off();
+
+    let (stop, board) = boot_and_run(&a.image(), |_| {});
+    assert_eq!(stop, StopReason::PoweredOff);
+    assert_eq!(board.machine.cpu.x[10], 0x8444_8004, "CTR_EL0: 64-byte lines");
+    assert_eq!(board.machine.cpu.x[11], 0x4, "DCZID_EL0: 64-byte ZVA block");
+    assert_eq!(board.machine.cpu.x[12], 0x8000_0000, "MPIDR_EL1: single core");
+    assert_eq!(board.machine.cpu.x[13], 0x11, "ID_AA64PFR0: AArch64 EL0/EL1");
+    assert_eq!(board.machine.cpu.x[14], 0x410f_d000, "MIDR_EL1: synthetic ARM part");
 }

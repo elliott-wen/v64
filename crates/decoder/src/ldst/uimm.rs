@@ -13,6 +13,8 @@ pub(crate) fn decode(word: u32) -> Insn {
             return Insn::Unsupported { word };
         };
         (log2, is_load, false, false, true)
+    } else if ldst::is_prefetch(size, opc) {
+        return Insn::Prfm; // PRFM (unsigned imm)
     } else {
         let Some((is_load, signed, dst64)) = ldst::kind(size, opc) else {
             return Insn::Unsupported { word };
@@ -26,6 +28,7 @@ pub(crate) fn decode(word: u32) -> Insn {
         signed,
         dst64,
         vec,
+        unpriv: false,
         rt: field(word, 0, 5) as u8,
         addr: AddrMode::UnsignedImm { rn: field(word, 5, 5) as u8, imm },
     }

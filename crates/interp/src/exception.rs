@@ -5,11 +5,23 @@
 //! EL1 exception registers (VBAR/ELR/SPSR/ESR/FAR) live in the system-register
 //! map so MRS/MSR and this logic stay consistent.
 
-use aarch64_cpu_state::CpuState;
+use aarch64_cpu_state::{Abort, CpuState};
 use aarch64_decoder::sysreg_key;
 
 /// Exception class for an SVC taken from AArch64.
 const EC_SVC: u32 = 0x15;
+/// Exception class "Unknown reason" — used for an unallocated/undefined
+/// instruction (and anything with no more specific class).
+const EC_UNKNOWN: u32 = 0x00;
+/// Exception class for a BRK (software breakpoint) in AArch64 state.
+const EC_BRK: u32 = 0x3c;
+/// Exception classes for aborts. The `_LOWER` form is taken from a lower EL
+/// (e.g. a userspace EL0 fault entering the EL1 kernel); `_SAME` from the
+/// current EL (a kernel fault).
+const EC_INST_ABORT_LOWER: u32 = 0x20;
+const EC_INST_ABORT_SAME: u32 = 0x21;
+const EC_DATA_ABORT_LOWER: u32 = 0x24;
+const EC_DATA_ABORT_SAME: u32 = 0x25;
 
 fn key_vbar_el1() -> u32 {
     sysreg_key(3, 0, 12, 0, 0)
@@ -22,6 +34,9 @@ fn key_spsr_el1() -> u32 {
 }
 fn key_esr_el1() -> u32 {
     sysreg_key(3, 0, 5, 2, 0)
+}
+fn key_far_el1() -> u32 {
+    sysreg_key(3, 0, 6, 0, 0)
 }
 
 /// SP_EL0 / SP_EL1 system-register keys (handled via SP banking, not the map).
@@ -82,6 +97,43 @@ pub fn take_irq(cpu: &mut CpuState) -> u64 {
 /// SVC #imm — exception to EL1. `pc` is the SVC's own address.
 pub(crate) fn svc(cpu: &mut CpuState, imm16: u16, pc: u64) -> Option<u64> {
     Some(take_exception(cpu, EC_SVC, u32::from(imm16), pc.wrapping_add(4)))
+}
+
+/// Undefined Instruction — an unallocated/unimplemented encoding. A real CPU
+/// raises a synchronous exception with ESR.EC = "Unknown" (the kernel then
+/// delivers SIGILL to a userspace process, or panics if it happened in the
+/// kernel) rather than halting. `pc` is the offending instruction (the return
+/// address). Returns the vector PC.
+pub fn undefined(cpu: &mut CpuState, pc: u64) -> u64 {
+    take_exception(cpu, EC_UNKNOWN, 0, pc)
+}
+
+/// BRK #imm — software breakpoint, a synchronous exception to EL1. The return
+/// address is the BRK itself (the guest handler decides whether to skip it, as
+/// the kernel's `WARN` fix-up does, or panic, as `BUG` does). The comment is the
+/// low 16 bits of the ESR ISS.
+pub(crate) fn brk(cpu: &mut CpuState, imm16: u16, pc: u64) -> Option<u64> {
+    Some(take_exception(cpu, EC_BRK, u32::from(imm16), pc))
+}
+
+/// Instruction Abort — a stage-1 translation fault on the instruction fetch at
+/// `fault_pc`. FAR_EL1 is the faulting VA (= PC) and the return address is the
+/// same PC, so the guest's handler can map the page and the fetch retries on
+/// ERET. Returns the vector PC.
+pub(crate) fn inst_abort(cpu: &mut CpuState, fault_pc: u64, fsc: u8) -> u64 {
+    let ec = if cpu.el == 0 { EC_INST_ABORT_LOWER } else { EC_INST_ABORT_SAME };
+    cpu.sysregs.insert(key_far_el1(), fault_pc);
+    take_exception(cpu, ec, u32::from(fsc) & 0x3f, fault_pc)
+}
+
+/// Data Abort — a stage-1 translation fault on a load/store. `fault_pc` is the
+/// faulting instruction (the retry target); the [`Abort`] carries FAR, the
+/// write flag (ESR.WnR), and the fault status code. Returns the vector PC.
+pub(crate) fn data_abort(cpu: &mut CpuState, fault_pc: u64, abort: Abort) -> u64 {
+    let ec = if cpu.el == 0 { EC_DATA_ABORT_LOWER } else { EC_DATA_ABORT_SAME };
+    let iss = (u32::from(abort.write) << 6) | (u32::from(abort.fsc) & 0x3f);
+    cpu.sysregs.insert(key_far_el1(), abort.far);
+    take_exception(cpu, ec, iss, fault_pc)
 }
 
 /// ERET — restore PC from ELR_EL1 and PSTATE from SPSR_EL1.

@@ -8,6 +8,22 @@ use crate::regs::GuestRegs;
 /// Encoded register index that aliases SP or the zero register.
 pub const SP_OR_ZR: u8 = 31;
 
+/// A pending synchronous memory abort produced by stage-1 translation during a
+/// *data* access. The run loop drains this after executing an instruction and
+/// vectors to EL1 (Data Abort) with the faulting instruction as the return
+/// address, so the guest's page-fault handler can map the page and retry. (An
+/// instruction-fetch abort is handled directly in the run loop and never lands
+/// here.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Abort {
+    /// Faulting virtual address (written to FAR_EL1).
+    pub far: u64,
+    /// True for a store (sets ESR.WnR), false for a load.
+    pub write: bool,
+    /// Fault Status Code for ESR.DFSC (e.g. translation fault at level n).
+    pub fsc: u8,
+}
+
 /// Architectural state of a single AArch64 core (EL0 subset).
 ///
 /// Register index 31 is special: depending on the instruction it means either
@@ -25,6 +41,10 @@ pub struct CpuState {
     pub v: [u128; 32],
     /// Floating-point control register (rounding mode, default-NaN, etc.).
     pub fpcr: u64,
+    /// FPSR — floating-point status register. We model the cumulative (sticky)
+    /// exception flags (IOC/DZC/OFC/UFC/IXC, bits 0..=4); they are observational
+    /// only (no FP result depends on them and we don't trap FP exceptions).
+    pub fpsr: u64,
     /// Exclusive monitor: `(address, value)` recorded by LDXR; a later STXR to
     /// the same address succeeds only if memory still holds `value`.
     pub excl: Option<(u64, u64)>,
@@ -43,6 +63,14 @@ pub struct CpuState {
     /// Set by a PSCI `SYSTEM_OFF`/`SYSTEM_RESET` call; the machine loop stops
     /// when it sees this. Not an architectural register — a host-side halt flag.
     pub powered_off: bool,
+    /// A data-access translation fault raised mid-instruction, drained by the run
+    /// loop after the instruction returns. Not architectural — a host-side
+    /// channel to carry the abort out of the memory helpers. See [`Abort`].
+    pub pending_abort: Option<Abort>,
+    /// Set when the last retired instruction was WFI/WFE. Not architectural — a
+    /// host-side hint the machine reads (and clears) to sleep through guest idle
+    /// instead of busy-spinning. The pure interpreter leaves it for the caller.
+    pub wfi: bool,
 }
 
 impl Default for CpuState {
@@ -54,6 +82,7 @@ impl Default for CpuState {
             flags: Flags::default(),
             v: [0; 32],
             fpcr: 0,
+            fpsr: 0,
             excl: None,
             sysregs: BTreeMap::new(),
             el: 1,
@@ -61,6 +90,8 @@ impl Default for CpuState {
             daif: 0,
             sp_el: [0; 4],
             powered_off: false,
+            pending_abort: None,
+            wfi: false,
         }
     }
 }

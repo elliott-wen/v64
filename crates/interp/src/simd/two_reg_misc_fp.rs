@@ -6,7 +6,7 @@
 use aarch64_cpu_state::CpuState;
 
 use crate::fp::{canon_d, canon_s};
-use crate::fp_round::{round_f32, round_f64, Mode};
+use crate::fp::round::{round_f32, round_f64, Mode};
 use crate::simd::{join, split};
 
 pub(crate) fn exec(

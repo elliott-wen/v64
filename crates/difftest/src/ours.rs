@@ -15,6 +15,9 @@ pub fn run_ours(tv: &TestVector) -> (StateSnapshot, StopReason) {
     if let Some(data) = &tv.init_data {
         mem.write(DATA_BASE, data);
     }
+    for (addr, bytes) in &tv.mem_patches {
+        mem.write(*addr, bytes);
+    }
 
     let mut cpu = CpuState::new();
     cpu.pc = CODE_START;

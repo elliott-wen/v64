@@ -7,8 +7,18 @@
 //! differential tests exercise.
 
 use aarch64_cpu_state::CpuState;
+use aarch64_decoder::sysreg_key;
 
 use crate::exception::{key_sp_el0, key_sp_el1};
+
+// FPCR/FPSR live in dedicated CpuState fields (the FP executors read/update them
+// directly), so route their MRS/MSR there rather than to the generic map.
+fn key_fpcr() -> u32 {
+    sysreg_key(3, 3, 4, 4, 0)
+}
+fn key_fpsr() -> u32 {
+    sysreg_key(3, 3, 4, 4, 1)
+}
 
 pub(crate) fn exec(cpu: &mut CpuState, read: bool, key: u32, rt: u8) -> Option<u64> {
     // SP_EL0/SP_EL1 are banked stack pointers, not plain map entries.
@@ -22,23 +32,35 @@ pub(crate) fn exec(cpu: &mut CpuState, read: bool, key: u32, rt: u8) -> Option<u
 
     if read {
         // MRS: sysreg -> Rt (ZR discards at r31, but reads still happen).
-        let val = match sp_bank {
-            Some(idx) => cpu.read_sp_el(idx),
-            // Timer registers have computed reads (TVAL/ISTATUS); others fall
-            // back to the plain map.
-            None => crate::timer::read(cpu, key)
-                .unwrap_or_else(|| cpu.sysregs.get(&key).copied().unwrap_or(0)),
+        let val = if key == key_fpcr() {
+            cpu.fpcr
+        } else if key == key_fpsr() {
+            cpu.fpsr
+        } else {
+            match sp_bank {
+                Some(idx) => cpu.read_sp_el(idx),
+                // Timer registers have computed reads (TVAL/ISTATUS); others fall
+                // back to the plain map.
+                None => crate::timer::read(cpu, key)
+                    .unwrap_or_else(|| cpu.sysregs.get(&key).copied().unwrap_or(0)),
+            }
         };
         cpu.write_gpr(rt, false, val);
     } else {
         // MSR: Rt -> sysreg (Rt == 31 reads as zero).
         let val = cpu.read_gpr(rt, false);
-        match sp_bank {
-            Some(idx) => cpu.write_sp_el(idx, val),
-            // A timer TVAL write becomes a CVAL store; others round-trip.
-            None if crate::timer::write(cpu, key, val) => {}
-            None => {
-                cpu.sysregs.insert(key, val);
+        if key == key_fpcr() {
+            cpu.fpcr = val;
+        } else if key == key_fpsr() {
+            cpu.fpsr = val;
+        } else {
+            match sp_bank {
+                Some(idx) => cpu.write_sp_el(idx, val),
+                // A timer TVAL write becomes a CVAL store; others round-trip.
+                None if crate::timer::write(cpu, key, val) => {}
+                None => {
+                    cpu.sysregs.insert(key, val);
+                }
             }
         }
     }

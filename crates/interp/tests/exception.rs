@@ -24,6 +24,9 @@ fn spsr_el1() -> u32 {
 fn esr_el1() -> u32 {
     sysreg_key(3, 0, 5, 2, 0)
 }
+fn far_el1() -> u32 {
+    sysreg_key(3, 0, 6, 0, 0)
+}
 
 #[test]
 fn svc_then_eret_roundtrips() {
@@ -56,4 +59,28 @@ fn svc_then_eret_roundtrips() {
     assert_eq!(cpu.el, 0);
     assert!(!cpu.spsel);
     assert_eq!(cpu.sp, EL0_SP, "restored SP_EL0");
+}
+
+#[test]
+fn unaligned_exclusive_takes_alignment_abort() {
+    // Exclusive/atomic accesses must be naturally aligned regardless of SCTLR.A;
+    // an unaligned address takes an Alignment Data Abort (DFSC = 0b100001).
+    let mut mem = Memory::new(0, 0x10000);
+    mem.write(CODE, &0xC85F_7C01u32.to_le_bytes()); // ldxr x1, [x0]
+
+    let mut cpu = CpuState::new(); // EL1h, IRQs unmasked
+    cpu.pc = CODE;
+    cpu.x[0] = 0x1004; // 8-byte access, not 8-byte aligned
+    cpu.sysregs.insert(vbar_el1(), VBAR);
+
+    // Same-EL synchronous exceptions vector to VBAR + 0x200.
+    assert_eq!(run(&mut cpu, &mut mem, VBAR + 0x200, 0), StopReason::UntilReached);
+    assert_eq!(cpu.pc, VBAR + 0x200);
+    assert_eq!(cpu.sysregs.get(&far_el1()), Some(&0x1004), "FAR = faulting VA");
+    let esr = *cpu.sysregs.get(&esr_el1()).unwrap();
+    assert_eq!(esr >> 26, 0x25, "EC = Data Abort, same EL");
+    assert_eq!(esr & 0x3f, 0x21, "DFSC = Alignment fault");
+    assert_eq!((esr >> 6) & 1, 0, "WnR = 0 for a load");
+    assert_eq!(cpu.x[1], 0, "destination register untouched on fault");
+    assert!(cpu.excl.is_none(), "monitor not armed on a faulting LDXR");
 }

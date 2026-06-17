@@ -24,6 +24,16 @@ pub trait MmioDevice {
     fn write(&mut self, offset: u64, size: u8, val: u64);
 }
 
+/// A device that performs DMA: it reads/writes guest memory *outside* its own
+/// MMIO window (e.g. virtio walking a virtqueue and moving block/framebuffer
+/// data). The [`crate::Machine`] calls [`poll`](DmaDevice::poll) periodically
+/// with full guest-memory access; the device drains any pending work and posts
+/// completions. It must be cheap when idle (typically a flag check), since it is
+/// polled on the machine's timer-sampling cadence.
+pub trait DmaDevice {
+    fn poll(&self, mem: &mut dyn GuestMem);
+}
+
 /// One device mapped into the physical-address space at `[base, base + size)`.
 struct DeviceEntry {
     base: u64,
@@ -98,20 +108,30 @@ impl Bus {
         Route::Unmapped
     }
 
+    /// True when `[addr, addr+size)` lies wholly within RAM. A `route` of `Ram`
+    /// only guarantees the *start* is in RAM; a wide access near the top edge
+    /// would otherwise index past the backing slice and panic the host.
+    fn ram_fits(&self, addr: u64, size: u8) -> bool {
+        let ram_end = self.ram.base + self.ram.bytes.len() as u64;
+        addr.checked_add(u64::from(size)).is_some_and(|end| end <= ram_end)
+    }
+
     fn load(&mut self, addr: u64, size: u8) -> u64 {
         match self.route(addr) {
-            Route::Ram => match size {
+            Route::Ram if self.ram_fits(addr, size) => match size {
                 1 => u64::from(self.ram.read_u8(addr)),
                 2 => u64::from(self.ram.read_u16(addr)),
                 4 => u64::from(self.ram.read_u32(addr)),
                 _ => self.ram.read_u64(addr),
             },
-            Route::Device(i) => {
+            Route::Device(i) if addr + u64::from(size) <= self.devices[i].base + self.devices[i].size => {
                 let off = addr - self.devices[i].base;
                 self.devices[i].dev.read(off, size)
             }
-            Route::Unmapped => {
-                eprintln!("bus: unmapped read{} @ {addr:#x} -> 0", size * 8);
+            // Out-of-range (access straddles the end of a region) or unmapped:
+            // read 0 rather than panic the host.
+            _ => {
+                eprintln!("bus: unmapped/oob read{} @ {addr:#x} -> 0", size * 8);
                 0
             }
         }
@@ -119,18 +139,18 @@ impl Bus {
 
     fn store(&mut self, addr: u64, size: u8, val: u64) {
         match self.route(addr) {
-            Route::Ram => match size {
+            Route::Ram if self.ram_fits(addr, size) => match size {
                 1 => self.ram.write_u8(addr, val as u8),
                 2 => self.ram.write_u16(addr, val as u16),
                 4 => self.ram.write_u32(addr, val as u32),
                 _ => self.ram.write_u64(addr, val),
             },
-            Route::Device(i) => {
+            Route::Device(i) if addr + u64::from(size) <= self.devices[i].base + self.devices[i].size => {
                 let off = addr - self.devices[i].base;
                 self.devices[i].dev.write(off, size, val);
             }
-            Route::Unmapped => {
-                eprintln!("bus: unmapped write{} @ {addr:#x} = {val:#x} (dropped)", size * 8);
+            _ => {
+                eprintln!("bus: unmapped/oob write{} @ {addr:#x} = {val:#x} (dropped)", size * 8);
             }
         }
     }

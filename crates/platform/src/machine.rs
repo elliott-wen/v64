@@ -7,13 +7,16 @@
 //! asynchronous IRQ exception when the GIC is asserting a line and `PSTATE.I` is
 //! clear.
 
+use std::collections::BTreeMap;
+
 use aarch64_cpu_state::CpuState;
 use aarch64_interp::{
-    physical_fires, set_count, set_frequency, step, take_irq, virtual_fires, Step, StopReason,
+    next_deadline, physical_fires, set_count, set_frequency, step, take_irq, undefined,
+    virtual_fires, Step, StopReason,
 };
 
 use crate::clock::{Clock, HostClock, DEFAULT_FREQ_HZ};
-use crate::{Bus, Gic};
+use crate::{Bus, DmaDevice, Gic};
 
 /// PSTATE.I (IRQ mask) within the packed DAIF nibble `[D,A,I,F]`.
 const PSTATE_I: u8 = 0b0010;
@@ -29,16 +32,41 @@ const PPI_PHYS_TIMER: u32 = 30;
 /// `clock_gettime` and sysreg-map churn from the hot path.
 const TIMER_SAMPLE_INTERVAL: u32 = 64;
 
+/// Upper bound on a single idle sleep, expressed as a rate: the machine never
+/// sleeps longer than `freq / MAX_IDLE_HZ` ticks (here ~20 ms) before returning
+/// to the host loop, so console input and the quit key are serviced promptly
+/// even when the next timer deadline is far away (or no timer is armed).
+const MAX_IDLE_HZ: u64 = 50;
+
 /// A single-core machine: CPU + physical bus + interrupt controller + clock.
 pub struct Machine {
     pub cpu: CpuState,
     pub bus: Bus,
     pub gic: Gic,
     clock: Box<dyn Clock>,
+    /// Timer tick frequency (Hz), used to bound how long an idle WFI sleeps.
+    freq: u64,
     /// How often (in instructions) to re-sample the clock; `1` = every step.
     timer_interval: u32,
     /// Counts down within the current sampling window; sample when it reaches 0.
     timer_counter: u32,
+    /// When true (default), an instruction the interpreter doesn't implement is
+    /// delivered to the guest as an Undefined Instruction exception — like real
+    /// hardware (the kernel raises SIGILL, or panics in kernel context) — instead
+    /// of stopping the machine. When false, `run` stops with `Unsupported`
+    /// (useful for bring-up). Each distinct undefined word is recorded either way.
+    undef_to_guest: bool,
+    /// Distinct undefined instruction words seen -> an example PC, for reporting.
+    undefined_seen: BTreeMap<u32, u64>,
+    /// DMA-capable devices (virtio) polled on the timer-sampling cadence with
+    /// full guest-memory access, so they can drain their virtqueues.
+    dma: Vec<Box<dyn DmaDevice>>,
+    /// When the last `run` returned because the guest went idle (WFI/WFE with no
+    /// pending interrupt), the counter tick the machine should resume at. The
+    /// host decides *how* to wait until then — a native binary sleeps, a browser
+    /// driver schedules a `setTimeout` — so the Machine itself never blocks and
+    /// stays usable on a single-threaded (WASM) host. `None` when not idle.
+    idle_until: Option<u64>,
 }
 
 impl Machine {
@@ -54,7 +82,39 @@ impl Machine {
     #[must_use]
     pub fn with_clock(mut cpu: CpuState, bus: Bus, gic: Gic, clock: Box<dyn Clock>, freq: u64) -> Self {
         set_frequency(&mut cpu, freq);
-        Self { cpu, bus, gic, clock, timer_interval: TIMER_SAMPLE_INTERVAL, timer_counter: 0 }
+        Self {
+            cpu,
+            bus,
+            gic,
+            clock,
+            freq,
+            timer_interval: TIMER_SAMPLE_INTERVAL,
+            timer_counter: 0,
+            undef_to_guest: true,
+            undefined_seen: BTreeMap::new(),
+            dma: Vec::new(),
+            idle_until: None,
+        }
+    }
+
+    /// Register a DMA-capable device (e.g. virtio-blk) to be polled with
+    /// guest-memory access on the timer-sampling cadence.
+    pub fn add_dma(&mut self, dev: Box<dyn DmaDevice>) {
+        self.dma.push(dev);
+    }
+
+    /// Choose how an unimplemented instruction is handled: deliver an Undefined
+    /// Instruction exception to the guest (`true`, default, faithful) or stop the
+    /// machine with `StopReason::Unsupported` (`false`, for bring-up).
+    pub fn set_undef_to_guest(&mut self, deliver: bool) {
+        self.undef_to_guest = deliver;
+    }
+
+    /// Distinct undefined instruction words encountered so far, each mapped to an
+    /// example PC where it occurred.
+    #[must_use]
+    pub fn undefined_seen(&self) -> &BTreeMap<u32, u64> {
+        &self.undefined_seen
     }
 
     /// Override the clock-sampling interval (instructions between samples). `1`
@@ -86,12 +146,66 @@ impl Machine {
         self.cpu.daif & PSTATE_I == 0 && self.gic.pending_irq()
     }
 
+    /// Note guest idle (after a WFI/WFE with no pending interrupt): record the
+    /// counter tick to resume at — the next enabled-timer deadline, bounded by
+    /// [`MAX_IDLE_HZ`] so injected console input and the quit key stay
+    /// responsive. Returns `true` if the machine is now idle (the caller should
+    /// stop and wait until [`Self::idle_for`]). Returns `false` if an interrupt
+    /// is already pending, so the caller keeps running and takes it immediately.
+    ///
+    /// Crucially this does *not* block: the host loop decides how to wait (a
+    /// native binary sleeps; a browser driver uses `setTimeout`), keeping the
+    /// Machine portable to a single-threaded WASM environment.
+    fn note_idle(&mut self) -> bool {
+        self.advance_timers();
+        if self.gic.pending_irq() {
+            return false; // already due — wake immediately
+        }
+        let now = self.clock.now();
+        let cap = now + self.freq / MAX_IDLE_HZ;
+        let target = match next_deadline(&self.cpu) {
+            Some(d) if d > now => d.min(cap),
+            Some(_) => return false, // a timer is already past its deadline
+            None => cap,             // nothing armed: wait a slice and re-poll
+        };
+        self.idle_until = Some(target);
+        self.timer_counter = 0; // re-sample the clock on the first step after waking
+        true
+    }
+
+    /// How long the host should wait before re-entering [`Self::run`], when the
+    /// last run stopped on guest idle. `None` if the machine isn't idle. The
+    /// duration is derived from the recorded deadline and the timer frequency, so
+    /// it is host-agnostic: a native loop passes it to `thread::sleep`, a browser
+    /// loop converts it to milliseconds for `setTimeout`.
+    /// The counter tick the machine will resume at after guest idle, if the last
+    /// run stopped on WFI/WFE. `None` otherwise. A tick-based host driver can use
+    /// this directly; most native callers want [`Self::idle_for`].
+    #[must_use]
+    pub fn idle_until_tick(&self) -> Option<u64> {
+        self.idle_until
+    }
+
+    #[must_use]
+    pub fn idle_for(&self) -> Option<std::time::Duration> {
+        let target = self.idle_until?;
+        let now = self.clock.now();
+        let ticks = target.saturating_sub(now);
+        let nanos = u128::from(ticks) * 1_000_000_000 / u128::from(self.freq.max(1));
+        Some(std::time::Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64))
+    }
+
     /// Execute one instruction: advance the timer, take a pending IRQ if one is
     /// deliverable, then run the instruction. Taking an IRQ vectors `cpu.pc` to
     /// the handler; the returned [`Step`] reflects the first handler instruction.
     pub fn step(&mut self) -> Step {
         if self.timer_counter == 0 {
             self.advance_timers();
+            // Service DMA devices (virtio) with full guest-memory access. Disjoint
+            // field borrows (`dma` shared, `bus` mutable) — cheap when idle.
+            for d in &self.dma {
+                d.poll(&mut self.bus);
+            }
         }
         self.timer_counter = (self.timer_counter + 1) % self.timer_interval;
 
@@ -106,6 +220,7 @@ impl Machine {
     /// Mirrors `aarch64_interp::run`'s stop contract.
     pub fn run(&mut self, until: u64, count: usize) -> StopReason {
         let mut executed = 0usize;
+        self.idle_until = None; // cleared unless this run stops on guest idle
         loop {
             if self.cpu.powered_off {
                 return StopReason::PoweredOff;
@@ -117,9 +232,27 @@ impl Machine {
                 return StopReason::CountReached;
             }
             if let Step::Unsupported { pc, word } = self.step() {
-                return StopReason::Unsupported { pc, word };
+                self.undefined_seen.entry(word).or_insert(pc);
+                if self.undef_to_guest {
+                    // Faithful: raise an Undefined Instruction exception to the
+                    // guest (SIGILL in userspace / panic in kernel), keep running.
+                    self.cpu.pc = undefined(&mut self.cpu, pc);
+                } else {
+                    return StopReason::Unsupported { pc, word };
+                }
             }
             executed += 1;
+
+            // Guest idle: the instruction just retired was WFI/WFE. If no IRQ is
+            // already deliverable, hand control back to the host loop with an idle
+            // deadline (see `idle_for`) instead of spinning the kernel's idle loop
+            // at full host speed. The host waits, then re-enters `run`.
+            if self.cpu.wfi {
+                self.cpu.wfi = false;
+                if !self.irq_deliverable() && self.note_idle() {
+                    return StopReason::CountReached;
+                }
+            }
         }
     }
 }

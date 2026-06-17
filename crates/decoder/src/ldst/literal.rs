@@ -17,7 +17,8 @@ pub(crate) fn decode(word: u32) -> Insn {
         match field(word, 30, 2) {
             0b00 => (2, false, false),
             0b01 => (3, false, true),
-            0b10 => (2, true, true), // LDRSW
+            0b10 => (2, true, true),     // LDRSW
+            0b11 => return Insn::Prfm,    // PRFM (literal)
             _ => return Insn::Unsupported { word },
         }
     };
@@ -28,6 +29,7 @@ pub(crate) fn decode(word: u32) -> Insn {
         signed,
         dst64,
         vec,
+        unpriv: false,
         rt: field(word, 0, 5) as u8,
         addr: AddrMode::Literal { offset },
     }

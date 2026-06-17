@@ -10,4 +10,4 @@ mod state;
 
 pub use flags::Flags;
 pub use regs::GuestRegs;
-pub use state::{CpuState, SP_OR_ZR};
+pub use state::{Abort, CpuState, SP_OR_ZR};

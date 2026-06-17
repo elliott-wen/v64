@@ -165,13 +165,16 @@ pub enum Insn {
     /// Load/store a single register. `size` is log2 of the access width in bytes
     /// (0=byte..3=dword, 4=128-bit Q for `vec`); `signed` sign-extends loaded
     /// values; `dst64` selects the X vs W result width for loads. When `vec`,
-    /// the register is a SIMD/FP register `V[rt]` (no sign extension).
+    /// the register is a SIMD/FP register `V[rt]` (no sign extension). `unpriv`
+    /// marks the unprivileged forms (LDTR/STTR), whose memory access is
+    /// permission-checked at EL0 even when executed from EL1.
     LoadStore {
         size: u8,
         is_load: bool,
         signed: bool,
         dst64: bool,
         vec: bool,
+        unpriv: bool,
         rt: u8,
         addr: AddrMode,
     },
@@ -190,6 +193,19 @@ pub enum Insn {
     /// Store exclusive (STXR/STLXR): store if the monitor is still armed; Ws
     /// receives 0 on success, 1 on failure.
     StoreExclusive { size: u8, rs: u8, rt: u8, rn: u8 },
+
+    /// Load exclusive pair (LDXP/LDAXP): load two `1<<size`-byte elements from
+    /// `[Rn]` into Rt/Rt2 and arm the monitor.
+    LoadExclusivePair { size: u8, rt: u8, rt2: u8, rn: u8 },
+
+    /// Store exclusive pair (STXP/STLXP): store Rt/Rt2 if the monitor holds; Ws
+    /// gets 0 on success, 1 on failure.
+    StoreExclusivePair { size: u8, rs: u8, rt: u8, rt2: u8, rn: u8 },
+
+    /// Compare-and-swap pair (CASP): if `[Rn]` (two elements) equals Rs/Rs+1,
+    /// store Rt/Rt+1; Rs/Rs+1 always receive the old memory pair. `sz` selects
+    /// 4-byte (0) vs 8-byte (1) elements.
+    CompareSwapPair { sz: u8, rs: u8, rn: u8, rt: u8 },
 
     /// Load/store pair. `width8` selects 8-byte (X) vs 4-byte (W) elements;
     /// `signed` is LDPSW (4-byte signed elements into X registers). `offset` is
@@ -235,6 +251,11 @@ pub enum Insn {
 
     /// FMOV (scalar, immediate).
     FpImm { ftype: u8, imm8: u8, rd: u8 },
+
+    /// Convert between FP and fixed-point (SCVTF/UCVTF/FCVTZS/FCVTZU with a
+    /// fraction-bits scale). `opcode`: 010=SCVTF,011=UCVTF,000=FCVTZS,001=FCVTZU.
+    /// The number of fractional bits is `64 - scale`.
+    FpCvtFixed { sf: bool, ftype: u8, opcode: u8, scale: u8, rn: u8, rd: u8 },
 
     /// MRS/MSR (register): move to/from a system register. `read` selects MRS
     /// (sysreg -> Rt) vs MSR (Rt -> sysreg). `key` is the encoded
@@ -385,6 +406,29 @@ pub enum Insn {
 
     /// NOP (and the wider hint space we treat as nops for now).
     Nop,
+
+    /// WFI — wait for interrupt. Architecturally a hint; the interpreter retires
+    /// it as a NOP, but the machine uses it to sleep until the next timer
+    /// deadline instead of busy-spinning through the kernel's idle loop.
+    Wfi,
+
+    /// WFE — wait for event. Treated like [`Insn::Wfi`] for idle fast-forward.
+    Wfe,
+
+    /// PRFM (prefetch memory), all addressing forms. A prefetch is purely a
+    /// performance hint with no architectural effect on registers or memory, so
+    /// the interpreter executes it as a no-op — but it decodes to its own variant
+    /// rather than `Nop` so the disassembly/intent stays faithful.
+    Prfm,
+
+    /// DC ZVA — zero a naturally-aligned block of memory whose size comes from
+    /// `DCZID_EL0`. `rt` holds the address. Unlike other cache maintenance this
+    /// has a real architectural effect (used by `clear_page`/`memset`).
+    DcZva { rt: u8 },
+
+    /// BRK #imm — software breakpoint, a synchronous exception to EL1 (debug).
+    /// Used by kernel `BUG()`/`WARN()` and userspace `__builtin_trap`.
+    Brk { imm16: u16 },
 
     /// Recognised encoding space but operand/variant not yet implemented.
     Unsupported { word: u32 },

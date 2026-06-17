@@ -10,6 +10,21 @@ pub(crate) fn decode(word: u32) -> Insn {
     let ftype = field(word, 22, 2) as u8;
     let rmode = field(word, 19, 2) as u8;
     let opcode = field(word, 16, 3) as u8;
+
+    // FMOV between a GPR and the high 64 bits of a 128-bit vector register:
+    // `FMOV Xd, Vn.D[1]` (opcode 110) / `FMOV Vd.D[1], Xn` (opcode 111). These
+    // use the otherwise-reserved ftype=10 with sf=1, rmode=01.
+    if sf && ftype == 0b10 && rmode == 0b01 && (opcode == 0b110 || opcode == 0b111) {
+        return Insn::FpCvtInt {
+            sf,
+            ftype,
+            rmode,
+            opcode,
+            rn: field(word, 5, 5) as u8,
+            rd: field(word, 0, 5) as u8,
+        };
+    }
+
     if !ftype_ok(ftype) {
         return Insn::Unsupported { word };
     }

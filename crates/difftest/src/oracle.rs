@@ -3,7 +3,9 @@
 //! This whole module is behind the `unicorn` feature because building Unicorn
 //! compiles QEMU via cmake.
 
-use unicorn_engine::{uc_error, Arch, Arm64CpuModel, Mode, Prot, RegisterARM64, Unicorn};
+use unicorn_engine::{
+    uc_error, Arch, Arm64CpuModel, Mode, Prot, RegisterARM64, RegisterARM64CP, TlbType, Unicorn,
+};
 
 use crate::ours::run_ours;
 use crate::snapshot::StateSnapshot;
@@ -78,10 +80,19 @@ fn setup(tv: &TestVector) -> Option<Unicorn<'static, ()>> {
     // later features). MAX enables the full feature set so the oracle accepts
     // everything we implement. Must be set before anything else.
     uc.ctl_set_cpu_model(Arm64CpuModel::MAX as i32).ok()?;
+    // For MMU tests, switch to the CPU TLB so Unicorn performs real ARM stage-1
+    // translation-table walks (its default virtual TLB does not). Must be set
+    // before mapping/running. Left at the default for the (MMU-off) ISA fuzzers.
+    if tv.cpu_tlb {
+        uc.ctl_set_tlb_type(TlbType::CPU).ok()?;
+    }
     uc.mem_map(MAP_BASE, MEM_SIZE as u64, Prot::ALL).ok()?;
     uc.mem_write(CODE_START, &tv.code).ok()?;
     if let Some(data) = &tv.init_data {
         uc.mem_write(DATA_BASE, data).ok()?;
+    }
+    for (addr, bytes) in &tv.mem_patches {
+        uc.mem_write(*addr, bytes).ok()?;
     }
     for (i, reg) in XREGS.iter().enumerate() {
         uc.reg_write(*reg, tv.init_x[i]).ok()?;
@@ -150,5 +161,39 @@ pub fn assert_matches_oracle(tv: &TestVector) {
     let oracle = run_unicorn(tv);
     if let Some(diff) = ours.diff(&oracle) {
         panic!("differential mismatch: {diff}\n ours:   {ours:?}\n oracle: {oracle:?}");
+    }
+}
+
+/// Outcome of an MMU test on Unicorn: either it ran to completion, or it took a
+/// stage-1 fault. Unicorn (unlike our interpreter) does not vector faults to the
+/// guest VBAR — it stops with `EXCEPTION` and leaves the syndrome in ESR/FAR, so
+/// we read those (via the coprocessor interface) for comparison.
+#[derive(Debug)]
+pub enum MmuOutcome {
+    Ran(StateSnapshot),
+    Faulted { dfsc: u8, far: u64 },
+}
+
+fn read_coproc(uc: &Unicorn<'static, ()>, crn: u32, crm: u32, op2: u32) -> Option<u64> {
+    let mut reg = RegisterARM64CP::new().op0(3).op1(0).crn(crn).crm(crm).op2(op2);
+    uc.reg_read_arm64_coproc(&mut reg).ok()?;
+    Some(reg.val)
+}
+
+/// Run an MMU test vector on Unicorn, reporting either the full result or the
+/// fault syndrome (ESR.DFSC + FAR_EL1).
+#[must_use]
+pub fn run_unicorn_mmu(tv: &TestVector) -> Option<MmuOutcome> {
+    let mut uc = setup(tv)?;
+    match uc.emu_start(CODE_START, tv.until(), 0, tv.count) {
+        Ok(()) => {
+            read_snapshot(&uc, tv.init_data.is_some(), tv.init_v.is_some()).map(MmuOutcome::Ran)
+        }
+        Err(uc_error::EXCEPTION) => {
+            let esr = read_coproc(&uc, 5, 2, 0)?; // ESR_EL1
+            let far = read_coproc(&uc, 6, 0, 0)?; // FAR_EL1
+            Some(MmuOutcome::Faulted { dfsc: (esr & 0x3f) as u8, far })
+        }
+        Err(_) => None,
     }
 }

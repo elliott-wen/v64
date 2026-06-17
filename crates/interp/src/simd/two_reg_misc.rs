@@ -1,11 +1,10 @@
 //! Advanced SIMD two-register misc (integer). Same-width ops live here; the
-//! shape-changing ops route to `simd_two_reg_narrow` (XTN family) and
-//! `simd_two_reg_long` (SHLL, SADDLP/SADALP).
+//! shape-changing ops route to `super::two_reg_narrow` (XTN family) and
+//! `super::two_reg_long` (SHLL, SADDLP/SADALP).
 
 use aarch64_cpu_state::CpuState;
 
 use crate::simd::{join, split};
-use crate::{simd_two_reg_long, simd_two_reg_narrow};
 
 pub(crate) fn exec(
     cpu: &mut CpuState,
@@ -21,9 +20,9 @@ pub(crate) fn exec(
     let mask128 = if q { u128::MAX } else { u128::from(u64::MAX) };
 
     let result = match (u, opcode) {
-        (_, 0b10010) | (_, 0b10100) => simd_two_reg_narrow::xtn(u, opcode, size, q, a, d),
-        (true, 0b10011) => simd_two_reg_long::shll(size, q, a),
-        (_, 0b00010) | (_, 0b00110) => simd_two_reg_long::addlp(u, opcode, size, q, a, d),
+        (_, 0b10010) | (_, 0b10100) => super::two_reg_narrow::xtn(u, opcode, size, q, a, d),
+        (true, 0b10011) => super::two_reg_long::shll(size, q, a),
+        (_, 0b00010) | (_, 0b00110) => super::two_reg_long::addlp(u, opcode, size, q, a, d),
         (_, 0b00011) => acc2(a, d, size, q, |x, dd, e| suqadd(u, x, dd, e)), // SUQADD/USQADD
         (false, 0b00000) => rev(a, size, q, 64),  // REV64
         (false, 0b00001) => rev(a, size, q, 16),  // REV16

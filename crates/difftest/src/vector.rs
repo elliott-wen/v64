@@ -24,6 +24,13 @@ pub struct TestVector {
     pub init_fpcr: u64,
     /// Instruction count cap (0 = run until end of code).
     pub count: usize,
+    /// Arbitrary physical-memory writes applied before the run (e.g. page
+    /// tables). `(physical_addr, bytes)`. Applied after `code`/`init_data`.
+    pub mem_patches: Vec<(u64, Vec<u8>)>,
+    /// When true the oracle uses Unicorn's CPU TLB so it performs real ARM
+    /// stage-1 translation-table walks (needed for MMU tests; the guest code
+    /// itself enables the MMU via `MSR`). Off for the MMU-disabled ISA fuzzers.
+    pub cpu_tlb: bool,
 }
 
 impl TestVector {
