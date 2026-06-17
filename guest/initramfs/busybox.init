@@ -1,0 +1,15 @@
+#!/bin/sh
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+export PATH=/bin
+echo "==================================="
+echo " busybox userspace is alive on v64"
+echo "==================================="
+busybox uname -a
+echo "pid1=$$  busybox=$(busybox | head -1)"
+echo "--- / ---"
+ls -l /
+echo "--- /proc/cpuinfo (head) ---"
+head -5 /proc/cpuinfo
+echo "=== handing off to interactive sh (needs stdin) ==="
+exec /bin/busybox sh

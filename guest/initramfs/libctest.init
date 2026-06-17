@@ -1,0 +1,44 @@
+#!/bin/sh
+BB=/bin/busybox
+$BB mount -t proc proc /proc
+$BB mount -t sysfs sysfs /sys
+# /dev is not auto-mounted for initramfs even with DEVTMPFS_MOUNT=y; do it here.
+$BB mount -t devtmpfs dev /dev 2>/dev/null
+# Fallback nodes in case devtmpfs is unavailable (rootfs is writable).
+[ -e /dev/null ]    || $BB mknod /dev/null    c 1 3
+[ -e /dev/zero ]    || $BB mknod /dev/zero    c 1 5
+[ -e /dev/full ]    || $BB mknod /dev/full    c 1 7
+[ -e /dev/random ]  || $BB mknod /dev/random  c 1 8
+[ -e /dev/urandom ] || $BB mknod /dev/urandom c 1 9
+# Create mountpoints *before* mounting — the old init skipped /tmp, so the
+# tmpfs mount silently failed and every tmpfile()/mkstemp() test broke.
+$BB mkdir -p /tmp /dev/shm
+$BB mount -t tmpfs tmpfs /tmp
+$BB mount -t tmpfs tmpfs /dev/shm
+export PATH=/bin TMPDIR=/tmp HOME=/tmp
+# Bring up loopback (busybox here has no ifconfig/ip) so localhost works.
+/bin/ifup-lo
+cd /tmp
+echo "=================================================="
+echo " libc-test (musl) on v64 — userspace functional run"
+echo "=================================================="
+pass=0; fail=0; failed=""
+for t in /tests/functional/* /tests/regression/*; do
+    name=${t##*/}
+    # 120s cap (the interpreter is slow); capture output so failures are visible.
+    if $BB timeout -s KILL 120 "$t" >/tmp/out 2>&1; then
+        pass=$((pass+1))
+    else
+        rc=$?
+        fail=$((fail+1)); failed="$failed $name"
+        echo "----- FAIL $name (rc=$rc) -----"
+        $BB head -c 1200 /tmp/out
+        echo ""
+    fi
+done
+echo "=================================================="
+echo " libc-test RESULT: $pass passed, $fail failed"
+[ -n "$failed" ] && echo " FAILED:$failed"
+echo " (rc=137 means killed by the 60s timeout, i.e. too slow, not wrong)"
+echo "=================================================="
+$BB poweroff -f

@@ -1,0 +1,15 @@
+#!/bin/sh
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null
+export PATH=/bin
+echo "==================================="
+echo " v64 UI test: framebuffer + input"
+echo "==================================="
+echo "--- /dev/fb* ---";       ls -l /dev/fb* 2>/dev/null || echo "  (none: enable DRM_VIRTIO_GPU + DRM_FBDEV_EMULATION)"
+echo "--- /dev/input/ ---";    ls -l /dev/input 2>/dev/null || echo "  (none: enable VIRTIO_INPUT + INPUT_EVDEV)"
+echo "--- /dev/dri/ ---";      ls -l /dev/dri 2>/dev/null
+echo "=== running uitest (ESC to quit) ==="
+/bin/uitest
+echo "=== uitest returned, powering off ==="
+/bin/busybox poweroff -f
