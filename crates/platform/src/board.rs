@@ -5,6 +5,7 @@
 use aarch64_cpu_state::CpuState;
 use aarch64_interp::Memory;
 
+use crate::clock::{Clock, HostClock, DEFAULT_FREQ_HZ};
 use crate::fdt::{virt_dtb, DtbConfig};
 use crate::{Bus, Gic, Machine, Uart};
 
@@ -90,9 +91,26 @@ impl Board {
         Self::with_ram(DEFAULT_RAM_SIZE)
     }
 
-    /// Build the board with `ram_size` bytes of RAM and all devices mapped.
+    /// Build the board with `ram_size` bytes of RAM and all devices mapped, using
+    /// the default host clock (native only — `HostClock` reads `Instant`).
     #[must_use]
     pub fn with_ram(ram_size: usize) -> Self {
+        Self::with_ram_and_clock(ram_size, Box::new(HostClock::new(DEFAULT_FREQ_HZ)))
+    }
+
+    /// Build the default-RAM board with a caller-supplied [`Clock`]. The seam for
+    /// non-native hosts: a browser/node build passes a clock backed by
+    /// `Date.now()`/`performance.now()` (where `HostClock`'s `Instant` is
+    /// unavailable).
+    #[must_use]
+    pub fn with_clock(clock: Box<dyn Clock>) -> Self {
+        Self::with_ram_and_clock(DEFAULT_RAM_SIZE, clock)
+    }
+
+    /// Build the board with `ram_size` bytes of RAM, all devices mapped, and the
+    /// given timer [`Clock`].
+    #[must_use]
+    pub fn with_ram_and_clock(ram_size: usize, clock: Box<dyn Clock>) -> Self {
         let gic = Gic::new();
         let uart = Uart::new(gic.clone(), UART_IRQ);
 
@@ -103,7 +121,7 @@ impl Board {
 
         let mut cpu = CpuState::new();
         reset_id_registers(&mut cpu);
-        let machine = Machine::new(cpu, bus, gic);
+        let machine = Machine::with_clock(cpu, bus, gic, clock, DEFAULT_FREQ_HZ);
         Board { machine, uart, virtio_slots: Vec::new() }
     }
 

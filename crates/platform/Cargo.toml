@@ -8,5 +8,17 @@ license.workspace = true
 aarch64-cpu-state.workspace = true
 aarch64-decoder.workspace = true
 aarch64-interp.workspace = true
-aarch64-jit.workspace = true
-sdl2 = "0.37"
+# SDL is the desktop front-end; it doesn't build for wasm32, so it's optional.
+# A wasm build uses `--no-default-features` (no SDL). The Machine is
+# interpreter-only on every target — the JIT lives in the browser, so there is
+# no wasmtime dependency here.
+sdl2 = { version = "0.37", optional = true }
+
+[features]
+default = ["sdl"]
+sdl = ["dep:sdl2"]
+
+# The SDL UI bin is native-only (a wasm build skips it).
+[[bin]]
+name = "v64"
+required-features = ["sdl"]

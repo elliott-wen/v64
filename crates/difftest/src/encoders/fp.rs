@@ -23,6 +23,7 @@ pub(super) fn classes() -> Vec<FpClass> {
         FpClass { name: "fp_csel", encode: fp_csel },
         FpClass { name: "fp_imm", encode: fp_imm },
         FpClass { name: "fp_cvt", encode: fp_cvt },
+        FpClass { name: "fp_cvt_fixed", encode: fp_cvt_fixed },
         FpClass { name: "fp_dp3", encode: fp_dp3 },
         FpClass { name: "fp_ccmp", encode: fp_ccmp },
     ]
@@ -140,15 +141,26 @@ fn fp_cvt(rng: &mut Rng) -> FpEncoded {
         4 => (0b00, 0b100), // FCVTAS
         5 => (0b00, 0b101), // FCVTAU
         _ => {
-            // FMOV requires matching width: W<->S or X<->D.
-            if rng.below(2) == 0 {
-                sf = 0;
-                ftype = 0;
-            } else {
-                sf = 1;
-                ftype = 1;
+            // FMOV: W<->S, X<->D, or the high-half X<->V.D[1] forms (sf=1,
+            // ftype=10, rmode=01) which move the top 64 bits of a Q register.
+            let opcode = if rng.below(2) == 0 { 0b110 } else { 0b111 };
+            match rng.below(3) {
+                0 => {
+                    sf = 0;
+                    ftype = 0;
+                    (0b00, opcode)
+                }
+                1 => {
+                    sf = 1;
+                    ftype = 1;
+                    (0b00, opcode)
+                }
+                _ => {
+                    sf = 1;
+                    ftype = 0b10;
+                    (0b01, opcode)
+                }
             }
-            (0b00, if rng.below(2) == 0 { 0b110 } else { 0b111 })
         }
     };
     let word = (sf << 31)
@@ -157,6 +169,31 @@ fn fp_cvt(rng: &mut Rng) -> FpEncoded {
         | (1 << 21)
         | (rmode << 19)
         | (opcode << 16)
+        | (reg(rng) << 5)
+        | reg(rng);
+    enc(word, rng)
+}
+
+fn fp_cvt_fixed(rng: &mut Rng) -> FpEncoded {
+    // Fixed-point conversions (bit21=0, 6-bit scale): SCVTF/UCVTF (fixed int ->
+    // FP) and FCVTZS/FCVTZU (FP -> fixed int, round toward zero).
+    let sf = rng.below(2);
+    let ftype = rng.below(2);
+    let (rmode, opcode) = match rng.below(4) {
+        0 => (0b00u32, 0b010u32), // SCVTF
+        1 => (0b00, 0b011),       // UCVTF
+        2 => (0b11, 0b000),       // FCVTZS
+        _ => (0b11, 0b001),       // FCVTZU
+    };
+    // fbits = 64 - scale. A 32-bit operand allows at most 32 fraction bits, so
+    // scale must be >= 32 there; a 64-bit operand allows the full range.
+    let scale = if sf == 1 { rng.below(64) } else { 32 + rng.below(32) };
+    let word = (sf << 31)
+        | (0b0011110 << 24)
+        | (ftype << 22)
+        | (rmode << 19)
+        | (opcode << 16)
+        | (scale << 10)
         | (reg(rng) << 5)
         | reg(rng);
     enc(word, rng)

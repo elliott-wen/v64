@@ -2,6 +2,9 @@
 /target
 **/target
 
+# wasm-bindgen generated bindings
+/crates/web/pkg
+
 # Backup / editor files
 *.swp
 *.swo

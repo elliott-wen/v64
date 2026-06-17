@@ -4,9 +4,11 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+# A pure WASM-block *emitter*: turns a guest block into a WebAssembly module.
+# It does not execute anything — the browser's `WebAssembly` engine runs the
+# emitted blocks. No wasmtime: native builds ship no JIT (interpreter only); the
+# JIT and its differential testing live in the browser/node environment.
 [dependencies]
 aarch64-cpu-state.workspace = true
 aarch64-decoder.workspace = true
-aarch64-interp.workspace = true
 wasm-encoder = "0.252.0"
-wasmtime = "45.0.1"

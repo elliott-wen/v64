@@ -15,12 +15,9 @@ const BOOTARGS: &str = "earlycon=pl011,0x9000000 console=ttyAMA0 rdinit=/init";
 const BATCH: usize = 5_000_000;
 
 fn main() -> ExitCode {
-    // `--jit` (anywhere) enables the JIT organizer; remaining args are positional
-    // <Image> [initramfs] [insn-budget].
-    let use_jit = std::env::args().any(|a| a == "--jit");
-    let mut args = std::env::args().skip(1).filter(|a| a != "--jit");
+    let mut args = std::env::args().skip(1);
     let Some(image_path) = args.next() else {
-        eprintln!("usage: bench [--jit] <Image> [initramfs] [insn-budget]");
+        eprintln!("usage: bench <Image> [initramfs] [insn-budget]");
         return ExitCode::FAILURE;
     };
     let initrd_path = args.next();
@@ -34,11 +31,8 @@ fn main() -> ExitCode {
     board.attach_input(InputKind::Mouse);
     board.attach_gpu(1024, 768);
     board.boot_image(&image, initrd.as_deref(), BOOTARGS);
-    if use_jit {
-        board.machine.enable_jit();
-    }
 
-    eprintln!("bench: running ~{budget} instructions (jit={use_jit})...");
+    eprintln!("bench: running ~{budget} instructions...");
     let start = Instant::now();
     let mut last = start;
     let mut last_insns = 0u64;

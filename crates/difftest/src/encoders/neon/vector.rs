@@ -7,12 +7,14 @@ use crate::rng::Rng;
 use crate::FpEncoded;
 
 pub(super) fn across(rng: &mut Rng) -> FpEncoded {
-    let (opcode, u) = match rng.below(5) {
+    let (opcode, u) = match rng.below(7) {
         0 => (0b11011u32, 0), // ADDV
         1 => (0b01010, 0),    // SMAXV
         2 => (0b01010, 1),    // UMAXV
         3 => (0b11010, 0),    // SMINV
-        _ => (0b11010, 1),    // UMINV
+        4 => (0b11010, 1),    // UMINV
+        5 => (0b00011, 0),    // SADDLV (widening add across)
+        _ => (0b00011, 1),    // UADDLV
     };
     let q = rng.below(2);
     let size = if q == 1 { rng.below(3) } else { rng.below(2) }; // 32-bit needs Q=1

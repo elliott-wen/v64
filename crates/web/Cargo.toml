@@ -1,0 +1,21 @@
+[package]
+name = "aarch64-web"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# A cdylib so it builds to a `.wasm` for browser/node. `wasm-bindgen` generates
+# the JS bindings (pass `Uint8Array`s, return values directly) — run the
+# generator after `cargo build --target wasm32-unknown-unknown`.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aarch64-cpu-state.workspace = true
+aarch64-interp.workspace = true
+# Interpreter-only Machine (no SDL, no JIT/wasmtime) — the wasm-friendly core.
+# Direct path dep (not workspace-inherited) so `default-features = false` is
+# honored and SDL is not pulled in.
+aarch64-platform = { path = "../platform", default-features = false }
+# Pinned to the installed `wasm-bindgen-cli` version (the two must match exactly).
+wasm-bindgen = "=0.2.125"

@@ -10,13 +10,28 @@ fn random_v_seeds(rng: &mut Rng) -> Vec<(u8, u128)> {
     (0..32).map(|r| (r, (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64()))).collect()
 }
 
-/// SIMD/FP load/store single register (V=1), unsigned-immediate form, B/H/S/D/Q.
+/// Pick a SIMD/FP access size: `(size[31:30], opc_hi[23], log2 bytes)` for
+/// B/H/S/D/Q. `opc_hi` (bit 23) widens to the 128-bit Q form.
+fn vec_size(rng: &mut Rng) -> (u32, u32, u32) {
+    [(0u32, 0u32, 0u32), (1, 0, 1), (2, 0, 2), (3, 0, 3), (0, 1, 4)][rng.below(5) as usize]
+}
+
+/// SIMD/FP load/store single register (V=1), B/H/S/D/Q, across every addressing
+/// form: unsigned-immediate, unscaled (LDUR), post/pre-index, register-offset.
 pub(super) fn ldst_vec_reg(rng: &mut Rng) -> MemEncoded {
-    // (size[31:30], opc_hi[23], log2 bytes).
-    let (size30, opc_hi, log2) =
-        [(0u32, 0u32, 0u32), (1, 0, 1), (2, 0, 2), (3, 0, 3), (0, 1, 4)][rng.below(5) as usize];
-    let l = rng.below(2); // store / load
-    let opc = (opc_hi << 1) | l;
+    match rng.below(5) {
+        0 => vec_uimm(rng),
+        1 => vec_imm9(rng, 0b00), // LDUR/STUR (unscaled)
+        2 => vec_imm9(rng, 0b01), // post-index
+        3 => vec_imm9(rng, 0b11), // pre-index
+        _ => vec_reg_off(rng),    // register offset
+    }
+}
+
+/// Unsigned-immediate vec single register.
+fn vec_uimm(rng: &mut Rng) -> MemEncoded {
+    let (size30, opc_hi, log2) = vec_size(rng);
+    let opc = (opc_hi << 1) | rng.below(2);
     let imm12 = rng.below(32);
     let rn = rng.below(31);
     let rt = rng.below(32);
@@ -36,10 +51,70 @@ pub(super) fn ldst_vec_reg(rng: &mut Rng) -> MemEncoded {
     MemEncoded { init_v: random_v_seeds(rng), word, seeds: vec![(rn as u8, base)], data: random_data(rng) }
 }
 
+/// imm9 vec single register: unscaled / post-index / pre-index (selected by
+/// `op1110`). The data register Vt and base Xn are different register files, so
+/// no rt/rn distinctness is needed even for the writeback forms.
+fn vec_imm9(rng: &mut Rng, op1110: u32) -> MemEncoded {
+    let (size30, opc_hi, _) = vec_size(rng);
+    let opc = (opc_hi << 1) | rng.below(2);
+    let imm9 = ((rng.below(512) as i64 - 256) as u32) & 0x1ff;
+    let rn = rng.below(31);
+    let rt = rng.below(32);
+
+    let word = (size30 << 30)
+        | (0b111 << 27)
+        | (1 << 26) // V
+        | (opc << 22)
+        | (imm9 << 12)
+        | (op1110 << 10)
+        | (rn << 5)
+        | rt;
+
+    MemEncoded {
+        init_v: random_v_seeds(rng),
+        word,
+        seeds: vec![(rn as u8, base_near_mid(rng, 0x400))],
+        data: random_data(rng),
+    }
+}
+
+/// Register-offset vec single register. Base Xn and index Xm are both GPRs, so
+/// they must be distinct to keep their seeds from colliding; Vt is unrelated.
+fn vec_reg_off(rng: &mut Rng) -> MemEncoded {
+    let (size30, opc_hi, _) = vec_size(rng);
+    let opc = (opc_hi << 1) | rng.below(2);
+    let option = [0b010u32, 0b011, 0b110, 0b111][rng.below(4) as usize];
+    let s = rng.below(2);
+    let rn = rng.below(31);
+    let rm = rt_distinct(rng, rn);
+    let rt = rng.below(32);
+
+    let word = (size30 << 30)
+        | (0b111 << 27)
+        | (1 << 26) // V
+        | (opc << 22)
+        | (1 << 21)
+        | (rm << 16)
+        | (option << 13)
+        | (s << 12)
+        | (0b10 << 10)
+        | (rn << 5)
+        | rt;
+
+    // Small index so base + (index << scale) stays mapped even for Q (16 B).
+    MemEncoded {
+        init_v: random_v_seeds(rng),
+        word,
+        seeds: vec![(rn as u8, base_near_mid(rng, 0x400)), (rm as u8, u64::from(rng.below(32)))],
+        data: random_data(rng),
+    }
+}
+
 /// SIMD/FP load/store pair (LDP/STP S/D/Q).
 pub(super) fn ldst_vec_pair(rng: &mut Rng) -> MemEncoded {
     let opc = [0u32, 1, 2][rng.below(3) as usize]; // S/D/Q
-    let idx = [0b01u32, 0b10, 0b11][rng.below(3) as usize]; // post / offset / pre
+    // non-allocating (LDNP/STNP) / post / offset / pre
+    let idx = [0b00u32, 0b01, 0b10, 0b11][rng.below(4) as usize];
     let l = rng.below(2);
     let rn = rng.below(31);
     let rt = rng.below(32);
