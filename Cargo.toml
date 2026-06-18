@@ -31,3 +31,6 @@ aarch64-platform = { path = "crates/platform" }
 [profile.release]
 lto = "fat"
 codegen-units = 1
+panic = "abort"  # no unwind tables (native); panics abort. Cargo still builds
+                 # the test/bench harness with unwind, so #[should_panic] works.
+strip = true     # drop symbols/name section — smaller shipped .wasm and binary
