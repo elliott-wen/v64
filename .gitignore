@@ -13,3 +13,5 @@
 
 # OS clutter
 .DS_Store
+
+buildroot/
