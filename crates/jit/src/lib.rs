@@ -24,4 +24,4 @@ pub use eligible::{
     can_inline, form_jit_block, form_region, is_inline_load_store, is_inline_load_store_pair,
     is_inline_mem, Region,
 };
-pub use emit::{emit_block, BLOCK_FUNC};
+pub use emit::{emit_block, emit_region, BLOCK_FUNC};

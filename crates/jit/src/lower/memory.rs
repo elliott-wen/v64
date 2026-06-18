@@ -34,6 +34,24 @@ use crate::abi;
 ///
 /// Returns `false` (no code emitted) for forms it doesn't inline — caller gates
 /// with [`crate::is_inline_load_store`], so that path is unreachable in practice.
+/// Emit the slow-path bail (shared by single + pair, region + non-region):
+/// record instructions retired, flag `jit_exit`, and return this instruction's
+/// PC so the organizer interprets it and resumes. `count_base` is `Some(local)`
+/// in a region — `jit_count = local + insns_before` (prior in-region blocks plus
+/// this block's progress) — or `None` for a single block (`jit_count =
+/// insns_before`).
+fn emit_bail(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_base: Option<u32>) {
+    emit!(f, I::LocalGet(REGS_BASE));
+    match count_base {
+        Some(cl) => emit!(f, I::LocalGet(cl), I::I64Const(insns_before as i64), I::I64Add),
+        None => emit!(f, I::I64Const(insns_before as i64)),
+    }
+    emit!(f, I::I64Store(at(JIT_COUNT_OFFSET)));
+    emit!(f, I::LocalGet(REGS_BASE), I::I64Const(1), I::I64Store(at(JIT_EXIT_OFFSET)));
+    gen_rel_pc(f, pc, entry_pc);
+    emit!(f, I::Return);
+}
+
 pub(crate) fn lower_mem(
     f: &mut Function,
     insn: &Insn,
@@ -42,6 +60,7 @@ pub(crate) fn lower_mem(
     insns_before: u64,
     ram_phys: u64,
     ram_size: u64,
+    count_base: Option<u32>,
 ) -> bool {
     let Insn::LoadStore { size, is_load, signed, dst64, vec, unpriv, rt, addr } = *insn else {
         return false;
@@ -191,11 +210,7 @@ pub(crate) fn lower_mem(
         emit!(f, I::I64Store(at(wb_off)));
     }
     emit!(f, I::Else);
-    // bail: record progress, flag the exit, return this instruction's PC.
-    emit!(f, I::LocalGet(REGS_BASE), I::I64Const(insns_before as i64), I::I64Store(at(JIT_COUNT_OFFSET)));
-    emit!(f, I::LocalGet(REGS_BASE), I::I64Const(1), I::I64Store(at(JIT_EXIT_OFFSET)));
-    gen_rel_pc(f, pc, entry_pc);
-    emit!(f, I::Return);
+    emit_bail(f, pc, entry_pc, insns_before, count_base);
     emit!(f, I::End);
     true
 }
@@ -387,6 +402,7 @@ pub(crate) fn lower_mem_pair(
     insns_before: u64,
     ram_phys: u64,
     ram_size: u64,
+    count_base: Option<u32>,
 ) -> bool {
     let Insn::LoadStorePair { is_load, signed, width8, vec, rt, rt2, rn, offset, index, .. } = *insn
     else {
@@ -513,10 +529,7 @@ pub(crate) fn lower_mem_pair(
         emit!(f, I::I64Store(at(base_off)));
     }
     emit!(f, I::Else);
-    emit!(f, I::LocalGet(REGS_BASE), I::I64Const(insns_before as i64), I::I64Store(at(JIT_COUNT_OFFSET)));
-    emit!(f, I::LocalGet(REGS_BASE), I::I64Const(1), I::I64Store(at(JIT_EXIT_OFFSET)));
-    gen_rel_pc(f, pc, entry_pc);
-    emit!(f, I::Return);
+    emit_bail(f, pc, entry_pc, insns_before, count_base);
     emit!(f, I::End);
     true
 }

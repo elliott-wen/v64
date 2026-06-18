@@ -26,6 +26,21 @@ pub const BLOCK_FUNC: &str = "block";
 /// RAM). `ram_phys`/`ram_size` bound the guest-physical RAM window, baked into the
 /// inline memory fast path (see `lower::lower_mem`).
 pub fn emit_block(block: &Block, ram_phys: u64, ram_size: u64) -> Vec<u8> {
+    wrap_module(emit_body(block, ram_phys, ram_size))
+}
+
+/// Emit a self-contained WASM module for a multi-block [`Region`](crate::Region)
+/// — one function with an internal dispatch loop, so control stays in compiled
+/// code across in-region branches (see [`crate::lower::emit_region_body`]). Same
+/// ABI and single `env.memory` import as [`emit_block`].
+#[must_use]
+pub fn emit_region(region: &crate::Region, ram_phys: u64, ram_size: u64) -> Vec<u8> {
+    wrap_module(crate::lower::emit_region_body(region, ram_phys, ram_size))
+}
+
+/// Wrap a block/region function body in the module scaffolding: the
+/// `(i32, i32) -> i64` type, the `env.memory` import, and the `block` export.
+fn wrap_module(body: Function) -> Vec<u8> {
     let mut module = Module::new();
 
     // Block signature: (regs_base: i32, ram_base: i32) -> i64 (next guest PC).
@@ -58,7 +73,7 @@ pub fn emit_block(block: &Block, ram_phys: u64, ram_size: u64) -> Vec<u8> {
     module.section(&exports);
 
     let mut code = CodeSection::new();
-    code.function(&emit_body(block, ram_phys, ram_size));
+    code.function(&body);
     module.section(&code);
 
     module.finish()
@@ -105,15 +120,17 @@ fn emit_body(block: &Block, ram_phys: u64, ram_size: u64) -> Function {
         } else if crate::is_inline_load_store(insn) {
             // Load/store: TLB-checked fast path, bail (return) on a miss. On a
             // bail `i` instructions already ran (the count to bill).
-            let ok = crate::lower::lower_mem(&mut f, insn, *pc, entry_pc, i as u64, ram_phys, ram_size);
+            let ok =
+                crate::lower::lower_mem(&mut f, insn, *pc, entry_pc, i as u64, ram_phys, ram_size, None);
             debug_assert!(ok, "inline load/store must be lowerable");
             if is_last {
                 crate::lower::gen_pc(&mut f, pc.wrapping_add(4), entry_pc);
             }
         } else if crate::is_inline_load_store_pair(insn) {
             // LDP/STP: same fast-path + bail, two registers.
-            let ok =
-                crate::lower::lower_mem_pair(&mut f, insn, *pc, entry_pc, i as u64, ram_phys, ram_size);
+            let ok = crate::lower::lower_mem_pair(
+                &mut f, insn, *pc, entry_pc, i as u64, ram_phys, ram_size, None,
+            );
             debug_assert!(ok, "inline load/store pair must be lowerable");
             if is_last {
                 crate::lower::gen_pc(&mut f, pc.wrapping_add(4), entry_pc);

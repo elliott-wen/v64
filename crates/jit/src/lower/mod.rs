@@ -35,6 +35,8 @@ mod memory;
 mod simd;
 mod terminator;
 
+use aarch64_cpu_state::regs::offsets;
+use aarch64_cpu_state::JIT_COUNT_OFFSET;
 use aarch64_decoder::{Block, Insn};
 use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
 
@@ -119,6 +121,168 @@ pub(crate) fn emit_self_loop(f: &mut Function, block: &Block, entry_pc: u64) {
     emit!(f, I::End); // end loop $top
     emit!(f, I::Unreachable); // unreachable: every path above branches out
     emit!(f, I::End); // end block $exit — leaves the next PC (i64) on the stack
+}
+
+/// Dispatch-loop iterations before a region yields to the organizer (so timers
+/// and IRQs get serviced) — like v86's `LOOP_COUNTER`. Each iteration runs one
+/// basic block, so this caps instructions executed between services.
+const MAX_REGION_ITERS: u32 = 8192;
+
+/// Emit a multi-block [`Region`](crate::Region) as one function with an internal
+/// dispatch loop. `RPC` holds the current guest PC; an if-chain jumps to the
+/// block whose entry matches it; each block's terminator either updates `RPC` and
+/// re-loops (`br $top`, for an in-region target) or returns (out-of-region,
+/// indirect, call, or fault). `RCOUNT` accumulates retired instructions for
+/// `jit_count`; `RITERS` bounds the loop. All PCs are position-independent
+/// relative to `region.entry`.
+pub(crate) fn emit_region_body(region: &crate::Region, ram_phys: u64, ram_size: u64) -> Function {
+    let mut f =
+        Function::new([(common::SCRATCH_I64, ValType::I64), (common::SCRATCH_I32, ValType::I32)]);
+    prologue(&mut f); // PC0 = runtime region-entry PC
+    emit!(f, I::LocalGet(common::PC0), I::LocalSet(common::RPC));
+
+    emit!(f, I::Loop(BlockType::Empty)); // $top
+    // safety: yield after MAX_REGION_ITERS block transitions
+    emit!(
+        f,
+        I::LocalGet(common::RITERS),
+        I::I32Const(MAX_REGION_ITERS as i32),
+        I::I32GeU,
+        I::If(BlockType::Empty)
+    );
+    region_exit(&mut f);
+    emit!(f, I::End);
+    emit!(f, I::LocalGet(common::RITERS), I::I32Const(1), I::I32Add, I::LocalSet(common::RITERS));
+
+    // dispatch if-chain: run a block when RPC equals its entry.
+    for block in &region.blocks {
+        emit!(f, I::LocalGet(common::RPC));
+        common::gen_rel_pc(&mut f, block.start, region.entry);
+        emit!(f, I::I64Eq, I::If(BlockType::Empty));
+        emit_region_block(&mut f, block, region, ram_phys, ram_size);
+        emit!(f, I::End);
+    }
+    // default: RPC isn't a known block entry — leave the region.
+    region_exit(&mut f);
+    emit!(f, I::End); // end $top
+    emit!(f, I::Unreachable);
+    f.instruction(&I::End);
+    f
+}
+
+/// Store `jit_count = RCOUNT` and return `RPC` — the region's exit sequence.
+fn region_exit(f: &mut Function) {
+    emit!(
+        f,
+        I::LocalGet(common::REGS_BASE),
+        I::LocalGet(common::RCOUNT),
+        I::I64Store(common::at(JIT_COUNT_OFFSET))
+    );
+    emit!(f, I::LocalGet(common::RPC), I::Return);
+}
+
+/// `RPC = ` the runtime PC for guest VA `abs` (position-independent).
+fn set_rpc(f: &mut Function, abs: u64, entry: u64) {
+    common::gen_rel_pc(f, abs, entry);
+    emit!(f, I::LocalSet(common::RPC));
+}
+
+/// Store guest VA `abs` (PI) into register `reg` — the `BL`/`BLR` link address.
+fn store_reg_pc(f: &mut Function, reg: usize, abs: u64, entry: u64) {
+    emit!(f, I::LocalGet(common::REGS_BASE));
+    common::gen_rel_pc(f, abs, entry);
+    emit!(f, I::I64Store(common::at(offsets::x(reg))));
+}
+
+/// Emit one block inside the dispatch loop: its body, the `RCOUNT += len`, and
+/// the terminator routing (continue in-region via `br $top`, or exit via return).
+fn emit_region_block(f: &mut Function, block: &Block, region: &crate::Region, ram_phys: u64, ram_size: u64) {
+    let entry = region.entry;
+    let n = block.insns.len();
+    let pc = block.insns[n - 1].0;
+    let term = block.insns[n - 1].1;
+    let has_term = crate::eligible::is_branch(&term);
+    let body_len = if has_term { n - 1 } else { n };
+
+    for i in 0..body_len {
+        let (ipc, insn) = &block.insns[i];
+        if crate::is_inline_load_store(insn) {
+            lower_mem(f, insn, *ipc, entry, i as u64, ram_phys, ram_size, Some(common::RCOUNT));
+        } else if crate::is_inline_load_store_pair(insn) {
+            lower_mem_pair(f, insn, *ipc, entry, i as u64, ram_phys, ram_size, Some(common::RCOUNT));
+        } else {
+            lower_sequential(f, insn, *ipc, entry, 0);
+        }
+    }
+    // The whole block (incl. its terminator branch, if any) retired.
+    emit!(f, I::LocalGet(common::RCOUNT), I::I64Const(n as i64), I::I64Add, I::LocalSet(common::RCOUNT));
+
+    let in_region = |t: u64| region.blocks.iter().any(|b| b.start == t);
+    if !has_term {
+        // Ran to a non-inline instruction at pc+4: exit so the organizer runs it.
+        set_rpc(f, pc.wrapping_add(4), entry);
+        region_exit(f);
+        return;
+    }
+    match term {
+        Insn::BranchImm { link: false, offset } => {
+            let target = pc.wrapping_add(offset as u64);
+            set_rpc(f, target, entry);
+            if in_region(target) {
+                emit!(f, I::Br(1)); // -> $top (enclosing: dispatch-if, loop)
+            } else {
+                region_exit(f);
+            }
+        }
+        Insn::BranchImm { link: true, offset } => {
+            // BL: a call leaves the region; set the link register, then exit.
+            store_reg_pc(f, 30, pc.wrapping_add(4), entry);
+            set_rpc(f, pc.wrapping_add(offset as u64), entry);
+            region_exit(f);
+        }
+        Insn::BranchReg { opc, rn } => {
+            if opc == 1 {
+                store_reg_pc(f, 30, pc.wrapping_add(4), entry); // BLR link
+            }
+            if rn == 31 {
+                emit!(f, I::I64Const(0), I::LocalSet(common::RPC));
+            } else {
+                emit!(
+                    f,
+                    I::LocalGet(common::REGS_BASE),
+                    I::I64Load(common::at(offsets::x(rn as usize))),
+                    I::LocalSet(common::RPC)
+                );
+            }
+            region_exit(f);
+        }
+        Insn::CondBranch { .. } | Insn::CompareBranch { .. } | Insn::TestBranch { .. } => {
+            let taken = taken_target(&term, pc).unwrap();
+            let ft = pc.wrapping_add(4);
+            terminator::emit_taken_cond(f, &term); // i32: 1 = take the branch
+            emit!(f, I::If(BlockType::Empty));
+            region_route(f, taken, entry, in_region(taken));
+            emit!(f, I::Else);
+            region_route(f, ft, entry, in_region(ft));
+            emit!(f, I::End);
+        }
+        _ => {
+            // Shouldn't happen (has_term implies a known branch); exit safely.
+            set_rpc(f, pc.wrapping_add(4), entry);
+            region_exit(f);
+        }
+    }
+}
+
+/// One arm of a conditional terminator: continue in-region (`br $top`, depth 2 —
+/// enclosing cond-if, dispatch-if, loop) or exit.
+fn region_route(f: &mut Function, target: u64, entry: u64, in_region: bool) {
+    set_rpc(f, target, entry);
+    if in_region {
+        emit!(f, I::Br(2));
+    } else {
+        region_exit(f);
+    }
 }
 
 /// Try to lower a non-terminator instruction. On success advances the image PC.

@@ -13,7 +13,7 @@
 //! loops pay compilation cost.
 
 use aarch64_interp::{step, translate, undefined, Access, GuestMem, Step, StopReason};
-use aarch64_jit::{emit_block, form_jit_block};
+use aarch64_jit::{emit_block, emit_region, form_region};
 
 use super::Machine;
 
@@ -22,6 +22,9 @@ const PAGE: u64 = 0x1000;
 
 /// Cap on instructions per JIT block.
 const MAX_JIT_BLOCK: usize = 256;
+
+/// Cap on basic blocks per compiled region (bounds compiled-function size).
+const MAX_REGION_BLOCKS: usize = 16;
 
 /// Executions of a block's entry before it is compiled — below this it's
 /// interpreted, so cold code never pays compilation cost; only hot loops do.
@@ -173,14 +176,21 @@ impl Machine {
                     self.jit_cache.insert(pa, JitBlock::Cold { count: count + 1 });
                     return None;
                 }
-                // Hot: form an inline block, emit it, and compile via the runner.
-                let block = self.form_jit_block(pc, pa);
-                if block.insns.is_empty() {
+                // Hot: discover the region (one or more basic blocks connected by
+                // in-page direct branches), emit it, and compile via the runner.
+                let region = self.form_jit_region(pc, pa);
+                if region.blocks.is_empty() {
                     self.jit_cache.insert(pa, JitBlock::Plain); // a lone non-inline op
                     return None;
                 }
                 let (_, ram_phys, ram_size) = self.bus.ram_jit_info();
-                let handle = runner.compile(&emit_block(&block, ram_phys, ram_size));
+                // A single-block region needs no dispatch loop — emit it directly.
+                let wasm = if region.blocks.len() == 1 {
+                    emit_block(&region.blocks[0], ram_phys, ram_size)
+                } else {
+                    emit_region(&region, ram_phys, ram_size)
+                };
+                let handle = runner.compile(&wasm);
                 self.jit_cache.insert(pa, JitBlock::Hot { handle });
                 handle
             }
@@ -215,11 +225,16 @@ impl Machine {
         Some(self.cpu.jit_count as usize)
     }
 
-    /// Form an inline JIT block at `pc` (physical `pa`), reading code words from
-    /// the (contiguous) physical page, bounded to the page and [`MAX_JIT_BLOCK`].
-    fn form_jit_block(&mut self, pc: u64, pa: u64) -> aarch64_jit::Block {
-        let page_words = ((PAGE - (pc & (PAGE - 1))) / 4).min(MAX_JIT_BLOCK as u64) as usize;
-        let words: Vec<u32> = (0..page_words as u64).map(|i| self.bus.read_u32(pa + i * 4)).collect();
-        form_jit_block(pc, page_words, |a| words[((a - pc) / 4) as usize])
+    /// Discover a JIT region at `pc` (physical `pa`). Reads the whole containing
+    /// page once — a region's blocks may precede the entry (a backward-branch
+    /// target) — and forms blocks via direct in-page branches, capped at
+    /// [`MAX_REGION_BLOCKS`] blocks of [`MAX_JIT_BLOCK`] instructions each.
+    fn form_jit_region(&mut self, pc: u64, pa: u64) -> aarch64_jit::Region {
+        let page_va = pc & !(PAGE - 1);
+        let page_pa = pa & !(PAGE - 1);
+        let words: Vec<u32> = (0..PAGE / 4).map(|i| self.bus.read_u32(page_pa + i * 4)).collect();
+        form_region(pc, MAX_REGION_BLOCKS, MAX_JIT_BLOCK, |a| {
+            words[((a - page_va) / 4) as usize]
+        })
     }
 }

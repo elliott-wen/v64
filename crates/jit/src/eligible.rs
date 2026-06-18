@@ -148,7 +148,10 @@ pub fn form_region(
         if seen.contains(&pc) || blocks.len() >= max_blocks {
             continue;
         }
-        let block = form_jit_block(pc, max_block_len, &read);
+        // Bound the block to the end of the page so `read` (and any caller's
+        // page-sized buffer) is never indexed past it; blocks don't span pages.
+        let to_page_end = ((page_base + 0x1000 - pc) / 4) as usize;
+        let block = form_jit_block(pc, max_block_len.min(to_page_end), &read);
         if block.insns.is_empty() {
             continue; // `pc` is a non-inline instruction: not a region block
         }

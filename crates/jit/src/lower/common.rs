@@ -27,17 +27,26 @@ pub(super) const T4: u32 = SCRATCH0 + 4;
 /// ([`gen_rel_pc`]) so the block is position-independent: the same physical block
 /// runs correctly at any virtual address it's mapped to.
 pub(super) const PC0: u32 = SCRATCH0 + 5;
+/// Region-compilation state (unused by single-block functions, which just leave
+/// these declared-but-untouched). `RPC` = the current guest PC the dispatch loop
+/// is at; `RCOUNT` = instructions retired so far this call (for `jit_count`).
+pub(super) const RPC: u32 = SCRATCH0 + 6;
+pub(super) const RCOUNT: u32 = SCRATCH0 + 7;
 /// Number of scratch i64 locals the block function declares.
-pub(crate) const SCRATCH_I64: u32 = 6;
-/// Number of scratch i32 locals: the computed linear address [`ADDR`] and the
-/// self-loop iteration counter [`PASSES`].
-pub(crate) const SCRATCH_I32: u32 = 2;
+pub(crate) const SCRATCH_I64: u32 = 8;
+/// Number of scratch i32 locals: the computed linear address [`ADDR`], the
+/// self-loop iteration counter [`PASSES`], and the region safety counter
+/// [`RITERS`].
+pub(crate) const SCRATCH_I32: u32 = 3;
 /// The i32 scratch local holding a computed linear memory address. First i32
 /// local, following the i64 scratch locals.
 pub(super) const ADDR: u32 = SCRATCH0 + SCRATCH_I64;
 /// The i32 local counting iterations of an internally-emitted self-loop (see
 /// `emit_self_loop`). Zero-initialised like all wasm locals.
 pub(super) const PASSES: u32 = SCRATCH0 + SCRATCH_I64 + 1;
+/// The i32 region dispatch-loop safety counter (caps iterations before yielding
+/// to the organizer to service timers/IRQs — like v86's `LOOP_COUNTER`).
+pub(super) const RITERS: u32 = SCRATCH0 + SCRATCH_I64 + 2;
 
 // NZCV bit positions in the packed word.
 pub(super) const N_BIT: i64 = 31;
