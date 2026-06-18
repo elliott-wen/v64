@@ -59,7 +59,7 @@ fn emit_bail(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_
 /// `if (fast_ok)` with the host linear address `ram_base + (pa - ram_phys) +
 /// page_offset` left in [`ADDR`]. The caller emits the access(es) and any base
 /// writeback, then calls [`close_fast_path`].
-fn open_fast_path(f: &mut Function, span: u64, store: bool, ram_phys: u64, ram_size: u64) {
+pub(super) fn open_fast_path(f: &mut Function, span: u64, store: bool, ram_phys: u64, ram_size: u64) {
     // entry = tlb_array + ((VA>>12) & (ENTRIES-1)) * ENTRY_SIZE  -> ADDR.
     // (CpuState.tlb is `Tlb { entries: Box<[Entry; N]> }`; the box is a thin
     // pointer at TLB_OFFSET, i.e. the array base.)
@@ -152,7 +152,7 @@ fn open_fast_path(f: &mut Function, span: u64, store: bool, ram_phys: u64, ram_s
 }
 
 /// Close the [`open_fast_path`] `if`: the `else` arm bails to the interpreter.
-fn close_fast_path(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_base: Option<u32>) {
+pub(super) fn close_fast_path(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_base: Option<u32>) {
     emit!(f, I::Else);
     emit_bail(f, pc, entry_pc, insns_before, count_base);
     emit!(f, I::End);
@@ -286,7 +286,7 @@ fn push_base_reg(f: &mut Function, rn: u8) {
     emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(off)));
 }
 
-fn load_op(size: u8, signed: bool) -> I<'static> {
+pub(super) fn load_op(size: u8, signed: bool) -> I<'static> {
     if signed {
         match size {
             0 => I::I64Load8S(at(0)),
@@ -304,7 +304,7 @@ fn load_op(size: u8, signed: bool) -> I<'static> {
     }
 }
 
-fn store_op(size: u8) -> I<'static> {
+pub(super) fn store_op(size: u8) -> I<'static> {
     match size {
         0 => I::I64Store8(at(0)),
         1 => I::I64Store16(at(0)),

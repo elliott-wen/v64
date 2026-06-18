@@ -19,7 +19,7 @@ mod region;
 // re-export for existing consumers.
 pub use aarch64_decoder::{form_block, Block};
 pub use eligible::{
-    can_inline, is_inline_load_store, is_inline_load_store_pair, is_inline_mem,
+    can_inline, is_inline_atomic, is_inline_load_store, is_inline_load_store_pair, is_inline_mem,
 };
 pub use emit::{emit_block, emit_region, BLOCK_FUNC};
 pub use region::{form_jit_block, form_region, Region};

@@ -142,6 +142,15 @@ fn emit_body(block: &Block, ram_phys: u64, ram_size: u64) -> Function {
             if is_last {
                 crate::lower::gen_pc(&mut f, pc.wrapping_add(4), entry_pc);
             }
+        } else if crate::is_inline_atomic(insn) {
+            // LSE atomic RMW / CAS: same fast-path + bail.
+            let ok = crate::lower::lower_atomic(
+                &mut f, insn, *pc, entry_pc, i as u64, ram_phys, ram_size, None,
+            );
+            debug_assert!(ok, "inline atomic must be lowerable");
+            if is_last {
+                crate::lower::gen_pc(&mut f, pc.wrapping_add(4), entry_pc);
+            }
         } else {
             // Register op: updates the image; leaves nothing.
             let ok = crate::lower::lower_sequential(&mut f, insn, *pc, entry_pc);

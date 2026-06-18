@@ -121,6 +121,16 @@ fn str64(rt: u32, rn: u32) -> u32 {
 fn ldr64(rt: u32, rn: u32) -> u32 {
     0xF940_0000 | (rn << 5) | rt
 }
+/// LSE atomic RMW: op 0..7 = LDADD/LDCLR/LDEOR/LDSET/LDS/U MAX/MIN, 8 = SWP.
+/// Acquire/release bits left 0 (no effect single-threaded).
+fn atomic_rmw(size: u32, op: u32, rs: u32, rn: u32, rt: u32) -> u32 {
+    let (o3, opc) = if op == 8 { (1, 0) } else { (0, op) };
+    (size << 30) | (0b111 << 27) | (1 << 21) | (rs << 16) | (o3 << 15) | (opc << 12) | (rn << 5) | rt
+}
+/// CAS: if [Rn] == Rs, store Rt; Rs always receives the old value.
+fn cas(size: u32, rs: u32, rn: u32, rt: u32) -> u32 {
+    (size << 30) | (0b001000 << 24) | (1 << 23) | (1 << 21) | (rs << 16) | (0b11111 << 10) | (rn << 5) | rt
+}
 /// SIMD three-same (Q, U, size, opcode); covers ADD/SUB/MUL/AND/ORR/EOR lanes.
 fn three_same(q: u32, u: u32, size: u32, opcode: u32, rd: u32, rn: u32, rm: u32) -> u32 {
     (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22) | (1 << 21) | (rm << 16)
@@ -329,6 +339,33 @@ fn memory_loads_stores_mmu_on() {
         "memory",
         enable_identity_mmu,
     );
+}
+
+/// Random LSE atomics (RMW + CAS) at every width, run with the MMU on (the fast
+/// path needs a TLB). The base register x1 points at mapped data; Rs/Rt are
+/// x2..x15 so they never touch the x0 loop counter or x1 base. Compares full
+/// architectural state *and* RAM, so a wrong stored value or returned old value
+/// fails loudly.
+#[wasm_bindgen_test]
+fn atomic_sweep() {
+    let mut rng = Rng::new(0xA70_31C5);
+    let data = RAM_BASE + 0x4000;
+    for i in 0..300u32 {
+        let size = rng.below(4);
+        let rs = 2 + rng.below(14);
+        let rt = 2 + rng.below(14);
+        let w = if rng.below(4) == 0 {
+            cas(size, rs, 1, rt)
+        } else {
+            atomic_rmw(size, rng.below(9), rs, 1, rt)
+        };
+        let code = [w, subs_imm(0, 0, 1), cbnz(0, -8)];
+        let mut xs = vec![(0usize, 400u64), (1usize, data)]; // counter past JIT_HOTNESS
+        for r in 2..16usize {
+            xs.push((r, rng.next()));
+        }
+        crosscheck_with(&code, &xs, &[], 12, &format!("atomic i={i} w={w:#010x}"), enable_identity_mmu);
+    }
 }
 
 // ---- Randomized-operand sweep over the lowered families. ----

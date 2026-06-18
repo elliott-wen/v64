@@ -86,11 +86,25 @@ pub fn is_branch(insn: &Insn) -> bool {
     )
 }
 
-/// True for any integer/SIMD memory access the JIT inlines — a single load/store
-/// ([`is_inline_load_store`]) or a load/store pair ([`is_inline_load_store_pair`]).
+/// True for any memory access the JIT inlines via the TLB fast path — a single
+/// load/store ([`is_inline_load_store`]), a load/store pair
+/// ([`is_inline_load_store_pair`]), or an LSE atomic ([`is_inline_atomic`]).
 #[must_use]
 pub fn is_inline_mem(insn: &Insn) -> bool {
-    is_inline_load_store(insn) || is_inline_load_store_pair(insn)
+    is_inline_load_store(insn) || is_inline_load_store_pair(insn) || is_inline_atomic(insn)
+}
+
+/// True for the LSE atomics [`crate::lower::lower_atomic`] inlines: read-modify-
+/// write (`LDADD`/`LDCLR`/`LDEOR`/`LDSET`/`LD{S,U}{MAX,MIN}`/`SWP`) and
+/// compare-and-swap, at 1/2/4/8-byte widths. The exclusive-monitor forms
+/// (`LDXR`/`STXR`) keep their monitor state in the interpreter.
+#[must_use]
+pub fn is_inline_atomic(insn: &Insn) -> bool {
+    match insn {
+        Insn::AtomicRmw { size, op, .. } => *size <= 3 && *op <= 8,
+        Insn::CompareSwap { size, .. } => *size <= 3,
+        _ => false,
+    }
 }
 
 /// True for the single-register load/store forms [`crate::lower::lower_mem`]

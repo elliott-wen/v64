@@ -28,6 +28,7 @@ macro_rules! emit {
 }
 
 mod arith;
+mod atomic;
 mod common;
 mod cond;
 mod dataproc;
@@ -42,6 +43,7 @@ use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
 
 use arith::BOp;
 
+pub(crate) use atomic::lower_atomic;
 pub(crate) use common::{SCRATCH_I32, SCRATCH_I64};
 pub(crate) use memory::{lower_mem, lower_mem_pair};
 pub(crate) use simd::is_inline_simd;
@@ -170,6 +172,8 @@ fn emit_region_block(
             lower_mem(f, insn, *ipc, entry, i as u64, ram_phys, ram_size, Some(common::RCOUNT));
         } else if crate::is_inline_load_store_pair(insn) {
             lower_mem_pair(f, insn, *ipc, entry, i as u64, ram_phys, ram_size, Some(common::RCOUNT));
+        } else if crate::is_inline_atomic(insn) {
+            lower_atomic(f, insn, *ipc, entry, i as u64, ram_phys, ram_size, Some(common::RCOUNT));
         } else {
             lower_sequential(f, insn, *ipc, entry);
         }
