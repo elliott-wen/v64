@@ -1,7 +1,8 @@
-// uitest emulator worker: runs the wasm emulator off the main thread and draws
-// the virtio-gpu scanout straight into an OffscreenCanvas, so the page's main
-// thread only forwards input and shows the console — it never blocks on
-// emulation or pixel work. See uitest.html for the main-thread half.
+// uitest emulator worker: runs the wasm emulator off the main thread. It does
+// NO rendering — when the guest draws a new frame it transfers the raw scanout
+// bytes to the page (zero-copy), which uploads them to a WebGL texture and lets
+// the GPU do the BGRA->RGBA swizzle. So the worker spends its time emulating and
+// the page's main thread stays free. See uitest.html for the main-thread half.
 
 import init, { Emulator } from './pkg-web/aarch64_web.js';
 
@@ -12,9 +13,6 @@ const CHUNK = 250_000;   // guest instructions per run() call
 const SLICE_MS = 8;      // run chunks up to this long, then yield to messages
 
 let emu = null;
-let ctx = null;          // OffscreenCanvas 2d context
-let canvas = null;
-let imageData = null;
 let useJit = true;
 let running = false;
 
@@ -29,9 +27,7 @@ async function bytes(url) {
   return new Uint8Array(await r.arrayBuffer());
 }
 
-async function start(offscreen) {
-  canvas = offscreen;
-  ctx = canvas.getContext('2d');
+async function start() {
   post({ ev: 'log', text: '[loading wasm + guest image…]\n' });
   await init();
   const [image, initrd] = await Promise.all([bytes(KERNEL), bytes(INITRD)]);
@@ -42,25 +38,6 @@ async function start(offscreen) {
   statT = performance.now();
   statN = 0;
   schedule(false);
-}
-
-function draw() {
-  const px = emu.take_frame(); // B8G8R8A8, empty if no new frame
-  if (px.length === 0) return;
-  const w = emu.fb_width(), h = emu.fb_height();
-  if (w === 0 || h === 0) return;
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w; canvas.height = h; imageData = null;
-  }
-  if (!imageData) imageData = ctx.createImageData(w, h);
-  // BGRA (LE u32 = A<<24|R<<16|G<<8|B) -> RGBA, opaque, a word at a time.
-  const src = new Uint32Array(px.buffer, px.byteOffset, px.length >> 2);
-  const dst = new Uint32Array(imageData.data.buffer);
-  for (let i = 0; i < src.length; i++) {
-    const v = src[i];
-    dst[i] = 0xff000000 | ((v & 0xff) << 16) | (v & 0x0000ff00) | ((v >> 16) & 0xff);
-  }
-  ctx.putImageData(imageData, 0, 0);
 }
 
 function tick() {
@@ -77,7 +54,10 @@ function tick() {
     if (Number(emu.total_insns()) - before < CHUNK) { idle = true; break; }
   } while (performance.now() - t < SLICE_MS);
 
-  draw();
+  // Hand any new frame to the page as raw BGRA bytes (transferred, not copied);
+  // the page does the format conversion on the GPU.
+  const px = emu.take_frame();
+  if (px.length) post({ ev: 'frame', w: emu.fb_width(), h: emu.fb_height(), buf: px }, [px.buffer]);
   if (uart) { post({ ev: 'uart', text: uart }); uart = ''; }
 
   const now = performance.now();
@@ -106,7 +86,7 @@ function schedule(idle) {
 onmessage = (e) => {
   const m = e.data;
   switch (m.cmd) {
-    case 'start': start(m.canvas).catch((err) => post({ ev: 'log', text: `\n[error: ${err.message || err}]\n` })); break;
+    case 'start': start().catch((err) => post({ ev: 'log', text: `\n[error: ${err.message || err}]\n` })); break;
     case 'jit': useJit = m.on; break;
     case 'key': if (emu) emu.key(m.code, m.down); break;
     case 'motion': if (emu) emu.mouse_motion(m.dx, m.dy, m.wheel); break;
@@ -114,4 +94,4 @@ onmessage = (e) => {
   }
 };
 
-function post(msg) { postMessage(msg); }
+function post(msg, transfer) { postMessage(msg, transfer || []); }

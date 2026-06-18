@@ -87,11 +87,59 @@ function fmtStats(m) {
   statsEl.textContent = `${insns}  ${mips}  ${mode}`;
 }
 
-function boot() {
-  if (!('transferControlToOffscreen' in canvas)) {
-    log('[error: this browser lacks OffscreenCanvas — try a recent Chrome/Firefox]\n');
-    return;
+// --- WebGL: draw the guest's framebuffer. The worker hands us raw BGRA bytes;
+// we upload them as an RGBA texture and a one-line shader swizzles to RGBA on
+// the GPU, so the main thread does no per-pixel work. ---
+let gl = null, tex = null, texW = 0, texH = 0, pendingFrame = null;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+function initGL() {
+  gl = canvas.getContext('webgl2', { antialias: false, depth: false });
+  if (!gl) { log('[error: WebGL2 unavailable — try a recent browser]\n'); return false; }
+  // Attribute-less fullscreen triangle strip via gl_VertexID; uv maps screen-top
+  // to framebuffer row 0 (texture uploaded unflipped). .bgr swizzles BGRA->RGB.
+  const vs = `#version 300 es
+    out vec2 uv;
+    const vec2 P[4] = vec2[4](vec2(-1.,-1.), vec2(1.,-1.), vec2(-1.,1.), vec2(1.,1.));
+    void main(){ vec2 p = P[gl_VertexID]; uv = vec2((p.x+1.)*0.5, (1.-p.y)*0.5); gl_Position = vec4(p,0.,1.); }`;
+  const fs = `#version 300 es
+    precision mediump float; uniform sampler2D t; in vec2 uv; out vec4 c;
+    void main(){ c = vec4(texture(t, uv).bgr, 1.0); }`;
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { log('[error: GL link]\n'); return false; }
+  gl.useProgram(prog);
+  tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return true;
+}
+
+// Render the latest frame once per display refresh (coalescing bursts).
+function render() {
+  if (pendingFrame) {
+    const { w, h, buf } = pendingFrame;
+    pendingFrame = null;
+    if (w !== texW || h !== texH) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); texW = w; texH = h; }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
+  if (running) requestAnimationFrame(render);
+}
+
+function boot() {
+  if (!gl && !initGL()) return;
   startBtn.disabled = true;
   startBtn.textContent = 'Booting…';
   consoleEl.textContent = '';
@@ -99,24 +147,25 @@ function boot() {
   worker = new Worker('./uitest-worker.js', { type: 'module' });
   worker.onmessage = (e) => {
     const m = e.data;
-    if (m.ev === 'uart' || m.ev === 'log') log(m.text);
+    if (m.ev === 'frame') pendingFrame = m;           // raw BGRA bytes (transferred)
+    else if (m.ev === 'uart' || m.ev === 'log') log(m.text);
     else if (m.ev === 'stats') fmtStats(m);
     else if (m.ev === 'off') { log('\n[guest powered off]\n'); stop(); }
   };
   worker.onerror = (e) => { log(`\n[worker error: ${e.message}]\n`); stop(); };
 
-  const offscreen = canvas.transferControlToOffscreen();
-  worker.postMessage({ cmd: 'start', canvas: offscreen }, [offscreen]);
+  worker.postMessage({ cmd: 'start' });
   worker.postMessage({ cmd: 'jit', on: jitBox.checked });
   running = true;
+  requestAnimationFrame(render);
 }
 
 function stop() {
   running = false;
-  // The canvas control was transferred to the worker, so re-booting needs a
-  // fresh page; prompt for a reload rather than re-enabling Boot.
-  startBtn.textContent = 'Reload to re-boot';
-  startBtn.disabled = true;
+  pendingFrame = null;
+  if (worker) { worker.terminate(); worker = null; }
+  startBtn.disabled = false;
+  startBtn.textContent = 'Boot';
 }
 
 startBtn.addEventListener('click', boot);
