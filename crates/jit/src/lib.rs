@@ -1,18 +1,15 @@
-//! AArch64 → WebAssembly block *emitter*.
+//! AArch64 → WebAssembly block/region *emitter*.
 //!
-//! This crate turns a straight-line block of guest instructions into a
-//! WebAssembly module ([`emit_block`]): a leading run of inline-lowerable
-//! register ops, ended by an "escape" instruction the host runs via the
-//! interpreter (`interpret_one`). It does **not** execute anything — the
-//! browser's `WebAssembly` engine instantiates and runs the emitted blocks,
-//! sharing one linear memory with the wasm-compiled interpreter. Native builds
-//! ship no JIT (interpreter only); the JIT and its differential testing live in
-//! the browser/node environment.
-//!
-//! The block↔runtime contract (linear-memory layout, register image, ABI, exit
-//! convention) lives in [`abi`].
+//! Turns guest code into a WebAssembly module: [`emit_block`] for a single basic
+//! block, [`emit_region`] for a region of blocks ([`form_region`]) wired into one
+//! function with an internal dispatch loop. Each lowering emits native wasm and,
+//! for memory, an inline TLB-checked fast path that **bails** to the interpreter
+//! on a miss (the block returns the faulting PC; no escape import). The module
+//! shares the host's linear memory, so generated code reads/writes the live
+//! `CpuState` and guest RAM directly. This crate does not execute anything — the
+//! browser/node `WebAssembly` engine instantiates and runs the modules. Native
+//! builds ship no JIT (interpreter only).
 
-pub mod abi;
 mod eligible;
 pub mod emit;
 mod lower;

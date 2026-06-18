@@ -1,15 +1,15 @@
-//! WASM emitter for a JIT block.
+//! WASM module emitter for a JIT block or region.
 //!
-//! A block (see [`crate::form_jit_block`]) is a fully inline-lowerable run of
-//! register ALU ops, optionally ended by one branch. The emitted module is
-//! self-contained except for one import — the shared linear memory holding the
-//! guest register image — and exports [`BLOCK_FUNC`] with the ABI
-//! `(param $regs_base i32) -> i64` (the next guest PC).
+//! Wraps a function body (from [`emit_body`] for a single block, or
+//! [`crate::lower::emit_region_body`] for a multi-block region) in a
+//! self-contained module: one import — the shared linear memory holding the live
+//! `CpuState` and guest RAM — and the export [`BLOCK_FUNC`] with the ABI
+//! `(param $regs_base i32, $ram_base i32) -> i64` (the next guest PC).
 //!
-//! There is no `interpret_one` escape: every instruction is lowered to native
-//! wasm. The block reads/writes registers in the image at `$regs_base`; the
-//! organizer syncs the image to the CPU around the call and interprets the
-//! (non-inline) instruction that follows the block itself.
+//! Every instruction is lowered to native wasm; memory accesses take an inline
+//! TLB-checked fast path and **bail** to the interpreter on a miss (returning the
+//! faulting PC). The block reads/writes the real registers in place at
+//! `$regs_base` (the live `CpuState`) — no escape import, no register-image copy.
 
 use wasm_encoder::{
     CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
@@ -48,7 +48,8 @@ fn wrap_module(body: Function) -> Vec<u8> {
     types.ty().function([ValType::I32, ValType::I32], [ValType::I64]);
     module.section(&types);
 
-    // Only import: the shared linear memory (mem 0) holding the register image.
+    // Only import: the shared linear memory (mem 0) holding the live CpuState and
+    // guest RAM.
     let mut imports = ImportSection::new();
     imports.import(
         "env",
@@ -137,7 +138,7 @@ fn emit_body(block: &Block, ram_phys: u64, ram_size: u64) -> Function {
             }
         } else {
             // Register op: updates the image; leaves nothing.
-            let ok = crate::lower::lower_sequential(&mut f, insn, *pc, entry_pc, 0);
+            let ok = crate::lower::lower_sequential(&mut f, insn, *pc, entry_pc);
             debug_assert!(ok, "non-terminator block instruction must be inline-lowerable");
             if is_last {
                 // Block ended before a non-inline instruction: return its PC.

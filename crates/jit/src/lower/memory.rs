@@ -1,11 +1,12 @@
-//! Inline loads/stores: single register (every addressing mode) and integer
-//! pairs, against the shared linear memory. Assumes identity mapping (MMU off —
-//! the runtime's only mode today); SIMD/FP, 128-bit, and odd extends fall back.
+//! Inline loads/stores with a TLB-checked fast path (the v86 model): single
+//! register ([`lower_mem`]) and pairs ([`lower_mem_pair`]), integer and SIMD/FP.
 //!
-//! A guest address `a` maps to linear offset `RAM_BASE + (a - guest_base)`. That
-//! displacement (`RAM_BASE - guest_base`) is a constant folded into the address
-//! arithmetic at emit time. Out-of-bounds accesses trap in WASM and surface as a
-//! guest fault (see the runtime), matching the interpreter's failure.
+//! Each access reads the live `CpuState` TLB for its page; on a valid, in-RAM,
+//! permitted, non-page-crossing hit it loads/stores directly at
+//! `ram_base + (pa - ram_phys) + page_offset`. Any miss (TLB miss, MMIO,
+//! permission fault, page cross) **bails** ([`emit_bail`]) — the block records
+//! its progress, flags `jit_exit`, and returns the faulting PC so the organizer
+//! interprets that one access and resumes.
 
 use aarch64_cpu_state::regs::offsets;
 use aarch64_cpu_state::{
@@ -17,7 +18,6 @@ use wasm_encoder::{BlockType, Function, Instruction as I};
 
 use super::arith::push_ext;
 use super::common::*;
-use crate::abi;
 
 /// Inline integer load/store with a **TLB-checked fast path** (the v86 model).
 ///
@@ -50,6 +50,112 @@ fn emit_bail(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_
     emit!(f, I::LocalGet(REGS_BASE), I::I64Const(1), I::I64Store(at(JIT_EXIT_OFFSET)));
     gen_rel_pc(f, pc, entry_pc);
     emit!(f, I::Return);
+}
+
+/// Emit the shared TLB fast-path gate, assuming the access VA is in [`T0`].
+/// Computes the TLB entry into [`ADDR`], then checks tag-match + RAM-range +
+/// no-page-cross (`span` bytes) + permission (read access; a `store` also needs
+/// the read-only bit clear — mirrors `mmu::check_perms`), and opens
+/// `if (fast_ok)` with the host linear address `ram_base + (pa - ram_phys) +
+/// page_offset` left in [`ADDR`]. The caller emits the access(es) and any base
+/// writeback, then calls [`close_fast_path`].
+fn open_fast_path(f: &mut Function, span: u64, store: bool, ram_phys: u64, ram_size: u64) {
+    // entry = tlb_array + ((VA>>12) & (ENTRIES-1)) * ENTRY_SIZE  -> ADDR.
+    // (CpuState.tlb is `Tlb { entries: Box<[Entry; N]> }`; the box is a thin
+    // pointer at TLB_OFFSET, i.e. the array base.)
+    emit!(f, I::LocalGet(REGS_BASE), I::I32Load(at(TLB_OFFSET)));
+    emit!(
+        f,
+        I::LocalGet(T0),
+        I::I64Const(12),
+        I::I64ShrU,
+        I::I64Const((TLB_ENTRIES - 1) as i64),
+        I::I64And,
+        I::I32WrapI64,
+        I::I32Const(ENTRY_SIZE as i32),
+        I::I32Mul,
+        I::I32Add,
+        I::LocalSet(ADDR)
+    );
+    // fast_ok = tag-match & pa-in-RAM (& no-page-cross) & permission.
+    emit!(
+        f,
+        I::LocalGet(ADDR),
+        I::I64Load(at(ENTRY_TAG)),
+        I::LocalGet(T0),
+        I::I64Const(!0xFFF_i64),
+        I::I64And,
+        I::I64Eq // tag == VA & ~0xFFF
+    );
+    emit!(
+        f,
+        I::LocalGet(ADDR),
+        I::I64Load(at(ENTRY_PA)),
+        I::I64Const(ram_phys as i64),
+        I::I64Sub,
+        I::I64Const(ram_size as i64),
+        I::I64LtU, // (pa - ram_phys) <u ram_size
+        I::I32And
+    );
+    if span > 1 {
+        emit!(
+            f,
+            I::LocalGet(T0),
+            I::I64Const(0xFFF),
+            I::I64And,
+            I::I64Const((0x1000 - span) as i64),
+            I::I64LeU, // (VA & 0xFFF) <= 0x1000 - span
+            I::I32And
+        );
+    }
+    // permission: can_access = (el != 0) | (perms & 1 = EL0-access); a store also
+    // needs the read-only bit (perms & 2) clear.
+    emit!(
+        f,
+        I::LocalGet(REGS_BASE),
+        I::I32Load8U(at(EL_OFFSET)),
+        I::I32Eqz,
+        I::I32Eqz, // el != 0
+        I::LocalGet(ADDR),
+        I::I32Load8U(at(ENTRY_PERMS)),
+        I::I32Const(1),
+        I::I32And, // perms & 1
+        I::I32Or
+    );
+    if store {
+        emit!(
+            f,
+            I::LocalGet(ADDR),
+            I::I32Load8U(at(ENTRY_PERMS)),
+            I::I32Const(0b10),
+            I::I32And,
+            I::I32Eqz, // !(perms & 2)
+            I::I32And
+        );
+    }
+    emit!(f, I::I32And); // fold permission into fast_ok
+
+    emit!(f, I::If(BlockType::Empty));
+    // host = ram_base + (pa - ram_phys) + (VA & 0xFFF)  -> ADDR
+    emit!(f, I::LocalGet(RAM_BASE));
+    emit!(
+        f,
+        I::LocalGet(ADDR),
+        I::I64Load(at(ENTRY_PA)),
+        I::I64Const(ram_phys as i64),
+        I::I64Sub,
+        I::I32WrapI64,
+        I::I32Add
+    );
+    emit!(f, I::LocalGet(T0), I::I64Const(0xFFF), I::I64And, I::I32WrapI64, I::I32Add);
+    emit!(f, I::LocalSet(ADDR));
+}
+
+/// Close the [`open_fast_path`] `if`: the `else` arm bails to the interpreter.
+fn close_fast_path(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_base: Option<u32>) {
+    emit!(f, I::Else);
+    emit_bail(f, pc, entry_pc, insns_before, count_base);
+    emit!(f, I::End);
 }
 
 pub(crate) fn lower_mem(
@@ -105,96 +211,7 @@ pub(crate) fn lower_mem(
         AddrMode::Literal { .. } => return false,
     }
 
-    // entry = tlb_array + ((VA>>12) & (ENTRIES-1)) * ENTRY_SIZE  -> ADDR
-    // (CpuState.tlb is `Tlb { entries: Box<[Entry; N]> }`; the box is a thin
-    // pointer at TLB_OFFSET, i.e. the array base.)
-    emit!(f, I::LocalGet(REGS_BASE), I::I32Load(at(TLB_OFFSET)));
-    emit!(
-        f,
-        I::LocalGet(T0),
-        I::I64Const(12),
-        I::I64ShrU,
-        I::I64Const((TLB_ENTRIES - 1) as i64),
-        I::I64And,
-        I::I32WrapI64,
-        I::I32Const(ENTRY_SIZE as i32),
-        I::I32Mul,
-        I::I32Add,
-        I::LocalSet(ADDR)
-    );
-
-    // fast_ok = tag-match & pa-in-RAM (& no-page-cross) & permission
-    emit!(
-        f,
-        I::LocalGet(ADDR),
-        I::I64Load(at(ENTRY_TAG)),
-        I::LocalGet(T0),
-        I::I64Const(!0xFFF_i64),
-        I::I64And,
-        I::I64Eq // tag == VA & ~0xFFF
-    );
-    emit!(
-        f,
-        I::LocalGet(ADDR),
-        I::I64Load(at(ENTRY_PA)),
-        I::I64Const(ram_phys as i64),
-        I::I64Sub,
-        I::I64Const(ram_size as i64),
-        I::I64LtU, // (pa - ram_phys) <u ram_size
-        I::I32And
-    );
-    if bytes > 1 {
-        emit!(
-            f,
-            I::LocalGet(T0),
-            I::I64Const(0xFFF),
-            I::I64And,
-            I::I64Const((0x1000 - bytes) as i64),
-            I::I64LeU, // (VA & 0xFFF) <= 0x1000 - bytes
-            I::I32And
-        );
-    }
-    // permission: can_access = (el != 0) | (perms & 1 = EL0-access); a store also
-    // needs the read-only bit (perms & 2) clear. (Mirrors mmu::check_perms.)
-    emit!(
-        f,
-        I::LocalGet(REGS_BASE),
-        I::I32Load8U(at(EL_OFFSET)),
-        I::I32Eqz,
-        I::I32Eqz, // el != 0
-        I::LocalGet(ADDR),
-        I::I32Load8U(at(ENTRY_PERMS)),
-        I::I32Const(1),
-        I::I32And, // perms & 1
-        I::I32Or
-    );
-    if !is_load {
-        emit!(
-            f,
-            I::LocalGet(ADDR),
-            I::I32Load8U(at(ENTRY_PERMS)),
-            I::I32Const(0b10),
-            I::I32And,
-            I::I32Eqz, // !(perms & 2)
-            I::I32And
-        );
-    }
-    emit!(f, I::I32And); // fold permission into fast_ok
-
-    emit!(f, I::If(BlockType::Empty));
-    // fast path: host = ram_base + (pa - ram_phys) + (VA & 0xFFF)  -> ADDR
-    emit!(f, I::LocalGet(RAM_BASE));
-    emit!(
-        f,
-        I::LocalGet(ADDR),
-        I::I64Load(at(ENTRY_PA)),
-        I::I64Const(ram_phys as i64),
-        I::I64Sub,
-        I::I32WrapI64,
-        I::I32Add
-    );
-    emit!(f, I::LocalGet(T0), I::I64Const(0xFFF), I::I64And, I::I32WrapI64, I::I32Add);
-    emit!(f, I::LocalSet(ADDR));
+    open_fast_path(f, bytes, !is_load, ram_phys, ram_size);
     match (vec, is_load) {
         (false, true) => int_load(f, size, signed, dst64, rt),
         (false, false) => int_store(f, size, rt),
@@ -210,91 +227,8 @@ pub(crate) fn lower_mem(
         }
         emit!(f, I::I64Store(at(wb_off)));
     }
-    emit!(f, I::Else);
-    emit_bail(f, pc, entry_pc, insns_before, count_base);
-    emit!(f, I::End);
+    close_fast_path(f, pc, entry_pc, insns_before, count_base);
     true
-}
-
-/// LDR/STR, single register (integer or SIMD/FP), every addressing mode. The
-/// 128-bit-and-narrower vector forms are handled; structure loads fall back.
-pub(super) fn load_store(f: &mut Function, insn: &Insn, pc: u64, guest_base: u64) -> bool {
-    let Insn::LoadStore { size, is_load, signed, dst64, vec, unpriv, rt, addr } = *insn else {
-        return false;
-    };
-    // Integer access widths are log2 0..=3; vector adds size 4 (the 128-bit Q).
-    if size > 4 || (!vec && size > 3) {
-        return false;
-    }
-    // LDTR/STTR need an EL0 permission check the JIT's direct access can't do;
-    // fall back to the interpreter.
-    if unpriv {
-        return false;
-    }
-
-    // Compute the linear address into the ADDR local, plus any base writeback.
-    let Some(writeback) = emit_ea(f, addr, pc, guest_base) else {
-        return false; // unsupported addressing form
-    };
-
-    match (vec, is_load) {
-        (false, true) => int_load(f, size, signed, dst64, rt),
-        (false, false) => int_store(f, size, rt),
-        (true, true) => vec_load(f, size, rt),
-        (true, false) => vec_store(f, size, rt),
-    }
-
-    if let Some(rn) = writeback {
-        let off = if rn == 31 { offsets::SP } else { offsets::x(rn as usize) };
-        emit!(f, I::LocalGet(0), I::LocalGet(T1), I::I64Store(at(off)));
-    }
-    true
-}
-
-/// Emit the addressing-mode computation, leaving the linear i32 address in the
-/// [`ADDR`] local. Returns `Some(writeback_reg)` (the base register to update
-/// after the access, via `T1`) or `None` if the mode isn't supported.
-fn emit_ea(f: &mut Function, addr: AddrMode, pc: u64, guest_base: u64) -> Option<Option<u8>> {
-    let delta = i64::from(abi::RAM_BASE) - guest_base as i64;
-    let mut writeback = None;
-    match addr {
-        AddrMode::UnsignedImm { rn, imm } => {
-            push_base_reg(f, rn);
-            emit!(f, I::I64Const((imm as i64).wrapping_add(delta)), I::I64Add, I::I32WrapI64);
-        }
-        AddrMode::Unscaled { rn, imm } => {
-            push_base_reg(f, rn);
-            emit!(f, I::I64Const(imm.wrapping_add(delta)), I::I64Add, I::I32WrapI64);
-        }
-        AddrMode::PreIndex { rn, imm } => {
-            push_base_reg(f, rn);
-            emit!(f, I::LocalSet(T0));
-            wb_value(f, imm);
-            writeback = Some(rn);
-            emit_addr_from(f, T0, imm.wrapping_add(delta));
-        }
-        AddrMode::PostIndex { rn, imm } => {
-            push_base_reg(f, rn);
-            emit!(f, I::LocalSet(T0));
-            wb_value(f, imm);
-            writeback = Some(rn);
-            emit_addr_from(f, T0, delta); // ea = old base
-        }
-        AddrMode::Literal { offset } => {
-            let lin = (pc.wrapping_add(offset as u64) as i64).wrapping_add(delta);
-            emit!(f, I::I64Const(lin), I::I32WrapI64);
-        }
-        AddrMode::RegOffset { rn, rm, option, shift } => {
-            if !matches!(option, 2 | 3 | 6 | 7) {
-                return None; // non-standard extend: slow path
-            }
-            push_base_reg(f, rn);
-            push_ext(f, rm, option, shift);
-            emit!(f, I::I64Add, I::I64Const(delta), I::I64Add, I::I32WrapI64);
-        }
-    }
-    emit!(f, I::LocalSet(ADDR));
-    Some(writeback)
 }
 
 /// Integer load from [`ADDR`] into register `rt`.
@@ -346,21 +280,10 @@ fn vec_store(f: &mut Function, size: u8, rt: u8) {
     }
 }
 
-/// Push the base register (r31 = SP) as a full i64.
+/// Push the addressing base register (r31 = SP) as a full i64.
 fn push_base_reg(f: &mut Function, rn: u8) {
     let off = if rn == 31 { offsets::SP } else { offsets::x(rn as usize) };
-    emit!(f, I::LocalGet(0), I::I64Load(at(off)));
-}
-
-/// Given a base i64 on the stack, fold in `disp` and wrap to the i32 address.
-/// Push `local + disp` wrapped to an i32 linear address.
-fn emit_addr_from(f: &mut Function, local: u32, disp: i64) {
-    emit!(f, I::LocalGet(local), I::I64Const(disp), I::I64Add, I::I32WrapI64);
-}
-
-/// Compute the writeback value `T0 + imm` into `T1`.
-fn wb_value(f: &mut Function, imm: i64) {
-    emit!(f, I::LocalGet(T0), I::I64Const(imm), I::I64Add, I::LocalSet(T1));
+    emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(off)));
 }
 
 fn load_op(size: u8, signed: bool) -> I<'static> {
@@ -432,90 +355,7 @@ pub(crate) fn lower_mem_pair(
     }
     emit!(f, I::LocalSet(T0));
 
-    // entry -> ADDR (same as lower_mem)
-    emit!(f, I::LocalGet(REGS_BASE), I::I32Load(at(TLB_OFFSET)));
-    emit!(
-        f,
-        I::LocalGet(T0),
-        I::I64Const(12),
-        I::I64ShrU,
-        I::I64Const((TLB_ENTRIES - 1) as i64),
-        I::I64And,
-        I::I32WrapI64,
-        I::I32Const(ENTRY_SIZE as i32),
-        I::I32Mul,
-        I::I32Add,
-        I::LocalSet(ADDR)
-    );
-
-    // fast_ok = tag & pa-in-RAM & no-page-cross(span) & permission
-    emit!(
-        f,
-        I::LocalGet(ADDR),
-        I::I64Load(at(ENTRY_TAG)),
-        I::LocalGet(T0),
-        I::I64Const(!0xFFF_i64),
-        I::I64And,
-        I::I64Eq
-    );
-    emit!(
-        f,
-        I::LocalGet(ADDR),
-        I::I64Load(at(ENTRY_PA)),
-        I::I64Const(ram_phys as i64),
-        I::I64Sub,
-        I::I64Const(ram_size as i64),
-        I::I64LtU,
-        I::I32And
-    );
-    emit!(
-        f,
-        I::LocalGet(T0),
-        I::I64Const(0xFFF),
-        I::I64And,
-        I::I64Const((0x1000 - span) as i64),
-        I::I64LeU,
-        I::I32And
-    );
-    emit!(
-        f,
-        I::LocalGet(REGS_BASE),
-        I::I32Load8U(at(EL_OFFSET)),
-        I::I32Eqz,
-        I::I32Eqz,
-        I::LocalGet(ADDR),
-        I::I32Load8U(at(ENTRY_PERMS)),
-        I::I32Const(1),
-        I::I32And,
-        I::I32Or
-    );
-    if !is_load {
-        emit!(
-            f,
-            I::LocalGet(ADDR),
-            I::I32Load8U(at(ENTRY_PERMS)),
-            I::I32Const(0b10),
-            I::I32And,
-            I::I32Eqz,
-            I::I32And
-        );
-    }
-    emit!(f, I::I32And);
-
-    emit!(f, I::If(BlockType::Empty));
-    // host -> ADDR
-    emit!(f, I::LocalGet(RAM_BASE));
-    emit!(
-        f,
-        I::LocalGet(ADDR),
-        I::I64Load(at(ENTRY_PA)),
-        I::I64Const(ram_phys as i64),
-        I::I64Sub,
-        I::I32WrapI64,
-        I::I32Add
-    );
-    emit!(f, I::LocalGet(T0), I::I64Const(0xFFF), I::I64And, I::I32WrapI64, I::I32Add);
-    emit!(f, I::LocalSet(ADDR));
+    open_fast_path(f, span, !is_load, ram_phys, ram_size);
     // two accesses, esize apart
     match (vec, is_load) {
         (false, true) => {
@@ -543,9 +383,7 @@ pub(crate) fn lower_mem_pair(
         }
         emit!(f, I::I64Store(at(base_off)));
     }
-    emit!(f, I::Else);
-    emit_bail(f, pc, entry_pc, insns_before, count_base);
-    emit!(f, I::End);
+    close_fast_path(f, pc, entry_pc, insns_before, count_base);
     true
 }
 
@@ -619,77 +457,3 @@ fn inline_pair_store(f: &mut Function, host_off: i64, size: u8, rt: u8) {
     emit!(f, store_op(size));
 }
 
-/// LDP/STP/LDPSW, integer and SIMD/FP pairs.
-pub(super) fn load_store_pair(f: &mut Function, insn: &Insn, guest_base: u64) -> bool {
-    let Insn::LoadStorePair { is_load, signed, width8, vec, vesize, rt, rt2, rn, offset, index } = *insn else {
-        return false;
-    };
-    let delta = i64::from(abi::RAM_BASE) - guest_base as i64;
-
-    // base -> T0; ea displacement depends on the index mode.
-    push_base_reg(f, rn);
-    emit!(f, I::LocalSet(T0));
-    let ea_disp = match index {
-        PairIndex::Post => 0,
-        PairIndex::Offset | PairIndex::Pre => offset,
-    };
-
-    if vec {
-        // Two SIMD/FP elements of width `vesize` (2=S, 3=D, 4=Q), `step` apart.
-        let step = 1i64 << vesize;
-        for (k, vt) in [rt, rt2].into_iter().enumerate() {
-            emit_addr_from(f, T0, ea_disp + step * k as i64 + delta);
-            emit!(f, I::LocalSet(ADDR));
-            if is_load {
-                vec_load(f, vesize, vt);
-            } else {
-                vec_store(f, vesize, vt);
-            }
-        }
-    } else {
-        let size = if width8 { 3 } else { 2 };
-        let esize = if width8 { 8i64 } else { 4 };
-        if is_load {
-            // LDPSW and the X form write full X; the W form zero-extends.
-            let wide = width8 || signed;
-            pair_load(f, T0, ea_disp + delta, size, signed, wide, rt);
-            pair_load(f, T0, ea_disp + esize + delta, size, signed, wide, rt2);
-        } else {
-            pair_store(f, T0, ea_disp + delta, size, rt);
-            pair_store(f, T0, ea_disp + esize + delta, size, rt2);
-        }
-    }
-
-    if matches!(index, PairIndex::Pre | PairIndex::Post) {
-        let off = if rn == 31 { offsets::SP } else { offsets::x(rn as usize) };
-        emit!(f, I::LocalGet(T0), I::I64Const(offset), I::I64Add); // base + offset
-        emit!(f, I::LocalSet(T1), I::LocalGet(0), I::LocalGet(T1), I::I64Store(at(off)));
-    }
-    true
-}
-
-fn pair_load(f: &mut Function, base: u32, disp: i64, size: u8, signed: bool, wide: bool, rt: u8) {
-    if rt != 31 {
-        emit!(f, I::LocalGet(0)); // regs_base for the result store
-    }
-    emit_addr_from(f, base, disp);
-    emit!(f, load_op(size, signed));
-    if signed && !wide {
-        emit!(f, I::I64Const(W_MASK), I::I64And);
-    }
-    if rt == 31 {
-        emit!(f, I::Drop);
-    } else {
-        emit!(f, I::I64Store(at(offsets::x(rt as usize))));
-    }
-}
-
-fn pair_store(f: &mut Function, base: u32, disp: i64, size: u8, rt: u8) {
-    emit_addr_from(f, base, disp);
-    if rt == 31 {
-        emit!(f, I::I64Const(0));
-    } else {
-        emit!(f, I::LocalGet(0), I::I64Load(at(offsets::x(rt as usize))));
-    }
-    emit!(f, store_op(size));
-}

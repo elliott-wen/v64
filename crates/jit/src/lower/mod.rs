@@ -1,25 +1,25 @@
-//! Inline instruction lowering (Milestones 3–4).
+//! Inline instruction lowering, and block/region assembly.
 //!
-//! Two entry points emit WASM for a single guest instruction directly, avoiding
-//! the `interpret_one` escape hatch:
+//! Each guest instruction is emitted directly as native WASM operating on the
+//! live `CpuState` in shared linear memory:
 //!
-//! - [`lower_sequential`] — non-terminator instructions. Updates registers/flags
-//!   in the image, advances the image PC to `pc + 4`, and leaves nothing on the
-//!   operand stack.
-//! - [`lower_terminator`] — control-flow instructions (always the last in a
-//!   block). Computes the next guest PC and leaves it on the stack as the block
-//!   function's `i64` result; it does *not* write the image PC (the runtime
-//!   writes the returned PC back after the call).
+//! - [`lower_sequential`] — non-terminator register ops. Updates registers/flags
+//!   in place; leaves nothing on the operand stack.
+//! - [`lower_mem`] / [`lower_mem_pair`] — loads/stores: an inline TLB-checked
+//!   fast path, bailing to the interpreter on a miss.
+//! - [`lower_terminator`] — control flow (last in a block). Leaves the next guest
+//!   PC on the stack as the function's `i64` result.
 //!
-//! Either returns `false` for anything it doesn't handle, so the caller falls
-//! back to `interpret_one`; correctness is never at stake, only speed. A
-//! lowering that may decline **must do so before emitting anything**, so a
-//! `false` return never leaves partial code in the function. Flags are computed
-//! inline into the packed NZCV word (no host helper calls).
+//! Block formation ([`crate::form_jit_block`]) only admits instructions these
+//! always handle, so lowering never fails mid-block. Flags are computed inline
+//! into the packed NZCV word (no host calls). PCs are position-independent
+//! (`runtime entry PC + delta`), so a physical block runs at any VA.
 //!
-//! The lowerings are grouped by instruction family across submodules:
-//! [`common`] (register/flag image access), [`arith`], [`cond`], [`dataproc`],
-//! [`memory`], and [`terminator`].
+//! Higher up, [`emit_self_loop`] turns a self-looping block into an internal wasm
+//! `loop`, and [`emit_region_body`] assembles a multi-block region into one
+//! function with a `br_table` dispatch loop. Lowerings are grouped by family:
+//! [`common`] (register/flag access), [`arith`], [`cond`], [`dataproc`],
+//! [`memory`], [`simd`], and [`terminator`].
 
 /// Emit a sequence of instructions into a [`wasm_encoder::Function`]. Defined
 /// before the submodule declarations so they inherit it via textual scoping.
@@ -99,7 +99,7 @@ pub(crate) fn emit_self_loop(f: &mut Function, block: &Block, entry_pc: u64) {
     emit!(f, I::Block(BlockType::Result(ValType::I64))); // $exit
     emit!(f, I::Loop(BlockType::Empty)); // $top
     for (pc, insn) in &block.insns[..n - 1] {
-        let ok = lower_sequential(f, insn, *pc, entry_pc, 0);
+        let ok = lower_sequential(f, insn, *pc, entry_pc);
         debug_assert!(ok, "self-loop body instruction must be inline-lowerable");
     }
     terminator::emit_taken_cond(f, last_insn); // i32: 1 = take the back-branch
@@ -129,12 +129,11 @@ pub(crate) fn emit_self_loop(f: &mut Function, block: &Block, entry_pc: u64) {
 const MAX_REGION_ITERS: u32 = 8192;
 
 /// Emit a multi-block [`Region`](crate::Region) as one function with an internal
-/// dispatch loop. `RPC` holds the current guest PC; an if-chain jumps to the
-/// block whose entry matches it; each block's terminator either updates `RPC` and
-/// re-loops (`br $top`, for an in-region target) or returns (out-of-region,
-/// indirect, call, or fault). `RCOUNT` accumulates retired instructions for
-/// `jit_count`; `RITERS` bounds the loop. All PCs are position-independent
-/// relative to `region.entry`.
+/// dispatch loop. `RIDX` holds the next block index; a `br_table` jumps to it in
+/// O(1); each block's terminator either sets `RIDX` (+ `RPC`) and re-loops (for an
+/// in-region target) or returns (out-of-region, indirect, call, or fault).
+/// `RCOUNT` accumulates retired instructions for `jit_count`; `RITERS` bounds the
+/// loop. All PCs are position-independent relative to `region.entry`.
 pub(crate) fn emit_region_body(region: &crate::Region, ram_phys: u64, ram_size: u64) -> Function {
     let mut f =
         Function::new([(common::SCRATCH_I64, ValType::I64), (common::SCRATCH_I32, ValType::I32)]);
@@ -230,7 +229,7 @@ fn emit_region_block(
         } else if crate::is_inline_load_store_pair(insn) {
             lower_mem_pair(f, insn, *ipc, entry, i as u64, ram_phys, ram_size, Some(common::RCOUNT));
         } else {
-            lower_sequential(f, insn, *ipc, entry, 0);
+            lower_sequential(f, insn, *ipc, entry);
         }
     }
     // The whole block (incl. its terminator branch, if any) retired.
@@ -301,7 +300,7 @@ fn region_route(f: &mut Function, target: u64, entry: u64, region: &crate::Regio
 }
 
 /// Try to lower a non-terminator instruction. On success advances the image PC.
-pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, entry_pc: u64, guest_base: u64) -> bool {
+pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, entry_pc: u64) -> bool {
     match *insn {
         // NOP and PRFM (prefetch hint) have no architectural effect.
         Insn::Nop | Insn::Prfm => {}
@@ -346,14 +345,8 @@ pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, entry_pc:
             let ok = dataproc::data_proc_3src(f, sf, op31, o0, rm, ra, rn, rd);
             return finish(f, pc, ok);
         }
-        Insn::LoadStore { .. } => {
-            let ok = memory::load_store(f, insn, pc, guest_base);
-            return finish(f, pc, ok);
-        }
-        Insn::LoadStorePair { .. } => {
-            let ok = memory::load_store_pair(f, insn, guest_base);
-            return finish(f, pc, ok);
-        }
+        // LoadStore / LoadStorePair are routed to `lower_mem` / `lower_mem_pair`
+        // by the emitter (they need the TLB fast path + bail), never here.
         Insn::SimdThreeSame { q, u, size, opcode, rm, rn, rd } => {
             let ok = simd::simd_three_same(f, q, u, size, opcode, rm, rn, rd);
             return finish(f, pc, ok);
