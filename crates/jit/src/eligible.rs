@@ -16,27 +16,59 @@ use aarch64_decoder::{AddrMode, Insn};
 
 /// True if `insn` is a non-terminator the inline lowerings always handle: a
 /// register-only ALU op, or an inlinable memory access ([`is_inline_mem`]).
-/// Block formation extends the inline run while this holds.
+/// Block formation extends the inline run while this holds. The data-processing
+/// classes (1/2/3-source) are partially lowered, so they delegate to per-class
+/// predicates that admit only the opcodes [`crate::lower`] emits (the rare
+/// CRC32 / SMULH / UMULH forms fall back to the interpreter).
 #[must_use]
 pub fn can_inline(insn: &Insn) -> bool {
-    is_inline_mem(insn)
-        || matches!(
-            insn,
-            Insn::MoveWide { .. }
-                | Insn::AddSubImm { .. }
-                | Insn::AddSubShiftedReg { .. }
-                | Insn::AddSubExtReg { .. }
-                | Insn::AddSubCarry { .. }
-                | Insn::LogicalImm { .. }
-                | Insn::LogicalShiftedReg { .. }
-                | Insn::Bitfield { .. }
-                | Insn::Extract { .. }
-                | Insn::PcRel { .. }
-                | Insn::CondSelect { .. }
-                | Insn::CondCompare { .. }
-                | Insn::Nop
-                | Insn::Prfm
-        )
+    if is_inline_mem(insn) {
+        return true;
+    }
+    match insn {
+        Insn::MoveWide { .. }
+        | Insn::AddSubImm { .. }
+        | Insn::AddSubShiftedReg { .. }
+        | Insn::AddSubExtReg { .. }
+        | Insn::AddSubCarry { .. }
+        | Insn::LogicalImm { .. }
+        | Insn::LogicalShiftedReg { .. }
+        | Insn::Bitfield { .. }
+        | Insn::Extract { .. }
+        | Insn::PcRel { .. }
+        | Insn::CondSelect { .. }
+        | Insn::CondCompare { .. }
+        | Insn::Nop
+        | Insn::Prfm => true,
+        Insn::DataProc1Src { sf, opcode, .. } => is_inline_dp1(*sf, *opcode),
+        Insn::DataProc2Src { opcode, .. } => is_inline_dp2(*opcode),
+        Insn::DataProc3Src { op31, .. } => is_inline_dp3(*op31),
+        _ => false,
+    }
+}
+
+/// DataProc (1-source) opcodes [`crate::lower::dataproc::data_proc_1src`] emits:
+/// RBIT/CLZ/CLS unconditionally, and REV16/REV32/REV where the reversal group
+/// fits the operand width (REV64 is X-only).
+fn is_inline_dp1(sf: bool, opcode: u8) -> bool {
+    match opcode {
+        0 | 4 | 5 => true,                                   // RBIT, CLZ, CLS
+        1..=3 => (1u32 << opcode) <= if sf { 8 } else { 4 }, // REV group <= datasize/8
+        _ => false,
+    }
+}
+
+/// DataProc (2-source) opcodes [`crate::lower::dataproc::data_proc_2src`] emits:
+/// UDIV/SDIV and the variable shifts LSLV/LSRV/ASRV/RORV (CRC32 falls back).
+fn is_inline_dp2(opcode: u8) -> bool {
+    matches!(opcode, 2 | 3 | 8 | 9 | 10 | 11)
+}
+
+/// DataProc (3-source) `op31` values [`crate::lower::dataproc::data_proc_3src`]
+/// emits: MADD/MSUB (`000`) and the widening S/UMADDL/S/UMSUBL (`001`/`101`).
+/// SMULH/UMULH (`010`/`110`) need a 128-bit product and fall back.
+fn is_inline_dp3(op31: u8) -> bool {
+    matches!(op31, 0b000 | 0b001 | 0b101)
 }
 
 /// True for a branch the emitter lowers inline as a block terminator.

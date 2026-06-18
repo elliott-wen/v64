@@ -1,8 +1,8 @@
 //! Bitfield moves and data-processing 1/2/3-source ops.
 //!
-//! Inlines what maps cleanly to WASM (CLZ, byte reversals, variable shifts,
-//! UDIV/SDIV with AArch64 divide semantics, MADD/MSUB and the widening
-//! multiply-accumulates). RBIT, CLS, CRC32, and SMULH/UMULH fall back.
+//! Inlines what maps cleanly to WASM (RBIT, CLZ, CLS, byte reversals, variable
+//! shifts, UDIV/SDIV with AArch64 divide semantics, MADD/MSUB and the widening
+//! multiply-accumulates). CRC32 and SMULH/UMULH fall back.
 
 use aarch64_cpu_state::regs::offsets;
 use aarch64_decoder::ShiftType;
@@ -60,11 +60,21 @@ pub(super) fn bitfield(f: &mut Function, sf: bool, opc: u8, wmask: u64, tmask: u
     store_local(f, rd, sf, false, T3);
 }
 
-/// Data processing (1 source): CLZ and REV16/REV32/REV inline; RBIT/CLS fall
-/// back. Returns whether it was handled (no emission on `false`).
+/// Data processing (1 source): RBIT, CLZ, CLS, and REV16/REV32/REV inline; CRC32
+/// (decoded elsewhere) is the only family left out. Returns whether it was
+/// handled (no emission on `false`) — kept in lockstep with `can_inline`.
 pub(super) fn data_proc_1src(f: &mut Function, sf: bool, opcode: u8, rn: u8, rd: u8) -> bool {
     let ds: u32 = if sf { 64 } else { 32 };
     match opcode {
+        0 => {
+            // RBIT: reverse all bits = swap bits within each byte, then reverse
+            // the byte order (the two compose to a full bit reversal).
+            push_operand(f, rn, sf, false);
+            emit!(f, I::LocalSet(T0));
+            swap_bits_in_byte(f, ds);
+            emit_byte_reverse(f, ds, ds / 8);
+            emit!(f, I::LocalSet(T0));
+        }
         4 => {
             // CLZ
             push_operand(f, rn, sf, false);
@@ -74,6 +84,20 @@ pub(super) fn data_proc_1src(f: &mut Function, sf: bool, opcode: u8, rn: u8, rd:
                 emit!(f, I::I32WrapI64, I::I32Clz, I::I64ExtendI32U);
             }
             emit!(f, I::LocalSet(T0));
+        }
+        5 => {
+            // CLS: count leading sign bits = CLZ(x ^ sign_extend(msb)) - 1. The
+            // xor leaves a 0 MSB, so CLZ >= 1 and the subtraction never underflows.
+            push_operand(f, rn, sf, false);
+            emit!(f, I::LocalSet(T0));
+            if sf {
+                emit!(f, I::LocalGet(T0), I::LocalGet(T0), I::I64Const(63), I::I64ShrS, I::I64Xor);
+                emit!(f, I::I64Clz, I::I64Const(1), I::I64Sub, I::LocalSet(T0));
+            } else {
+                emit!(f, I::LocalGet(T0), I::I32WrapI64);
+                emit!(f, I::LocalGet(T0), I::I32WrapI64, I::I32Const(31), I::I32ShrS, I::I32Xor);
+                emit!(f, I::I32Clz, I::I32Const(1), I::I32Sub, I::I64ExtendI32U, I::LocalSet(T0));
+            }
         }
         1..=3 => {
             let group = 1u32 << opcode; // REV16=2, REV32=4, REV(64)=8 bytes
@@ -85,10 +109,28 @@ pub(super) fn data_proc_1src(f: &mut Function, sf: bool, opcode: u8, rn: u8, rd:
             emit_byte_reverse(f, ds, group);
             emit!(f, I::LocalSet(T0));
         }
-        _ => return false, // RBIT, CLS: slow path
+        _ => return false, // unallocated
     }
     store_local(f, rd, sf, false, T0);
     true
+}
+
+/// Reverse the bit order within each byte of the low `ds` bits of `T0`, in place
+/// (the three classic mask-swap steps). Combined with [`emit_byte_reverse`] over
+/// the whole width this yields RBIT. `push_operand` zero-extends W operands, so
+/// the 32-bit masks keep the result in the low 32 bits.
+fn swap_bits_in_byte(f: &mut Function, ds: u32) {
+    let (m1, m2, m3) = if ds == 64 {
+        (0x5555_5555_5555_5555u64, 0x3333_3333_3333_3333, 0x0f0f_0f0f_0f0f_0f0f)
+    } else {
+        (0x5555_5555, 0x3333_3333, 0x0f0f_0f0f)
+    };
+    for (mask, sh) in [(m1, 1i64), (m2, 2), (m3, 4)] {
+        // T0 = ((T0 & mask) << sh) | ((T0 >> sh) & mask)
+        emit!(f, I::LocalGet(T0), I::I64Const(mask as i64), I::I64And, I::I64Const(sh), I::I64Shl);
+        emit!(f, I::LocalGet(T0), I::I64Const(sh), I::I64ShrU, I::I64Const(mask as i64), I::I64And);
+        emit!(f, I::I64Or, I::LocalSet(T0));
+    }
 }
 
 /// Reverse bytes within each `group`-byte chunk of the low `ds` bits of `T0`,

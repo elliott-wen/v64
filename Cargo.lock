@@ -53,6 +53,7 @@ name = "aarch64-web"
 version = "0.1.0"
 dependencies = [
  "aarch64-cpu-state",
+ "aarch64-decoder",
  "aarch64-interp",
  "aarch64-platform",
  "wasm-bindgen",
