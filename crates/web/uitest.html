@@ -24,7 +24,8 @@
   button { font: inherit; padding: 4px 12px; background: #2a6; color: #000; border: 0; border-radius: 4px; cursor: pointer; }
   button:disabled { background: #444; color: #888; cursor: default; }
   label { display: flex; gap: 5px; align-items: center; }
-  #stats { margin-left: auto; color: #8c8; white-space: pre; }
+  #stats { margin-left: auto; color: #8c8; white-space: pre; text-align: right;
+           width: 30ch; font-variant-numeric: tabular-nums; }
   main { display: flex; gap: 10px; padding: 10px; align-items: flex-start; flex-wrap: wrap; }
   #screen { background: #000; border: 1px solid #333; image-rendering: pixelated; width: 1024px; height: 768px; max-width: 100%; cursor: none; }
   #console { flex: 1; min-width: 320px; height: 768px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
@@ -131,8 +132,11 @@ function frame() {
   const mips = dt > 0.25 ? ((total - t0Insns.n) / 1e6 / dt) : 0;
   if (dt > 0.5) { t0Insns.t = now; t0Insns.n = total; }
   const cov = total ? (100 * Number(emu.jit_insns()) / total).toFixed(0) : '0';
-  statsEl.textContent =
-    `${(total/1e6).toFixed(1)}M insns  ${mips ? mips.toFixed(0)+' MIPS' : ''}  ${useJit ? 'JIT '+cov+'%' : 'interp'}`;
+  // Constant-width fields (with tabular-nums) so the readout doesn't shift.
+  const insns = `${(total / 1e6).toFixed(1)}`.padStart(6) + 'M';
+  const mipsStr = (mips ? mips.toFixed(0) : '—').padStart(4) + ' MIPS';
+  const mode = (useJit ? `JIT ${cov.padStart(3)}%` : 'interp').padStart(8);
+  statsEl.textContent = `${insns}  ${mipsStr}  ${mode}`;
 
   if (status === 1) { log('\n[guest powered off]\n'); stop(); return; }
   requestAnimationFrame(frame);
