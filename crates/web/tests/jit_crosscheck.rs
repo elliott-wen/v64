@@ -418,6 +418,64 @@ fn exclusive_value_changed() {
     crosscheck_with(&code, &[(0, 400), (1, 0), (2, data), (5, 0), (6, 0)], &[], 24, "excl_changed", enable_identity_mmu);
 }
 
+/// Fixed top bits `0 0 0 11110` of the FP data-processing encodings.
+const FP_HDR: u32 = 0b0001_1110 << 24;
+fn fp_dp1(ftype: u32, opcode: u32, rn: u32, rd: u32) -> u32 {
+    FP_HDR | (ftype << 22) | (1 << 21) | (opcode << 15) | (0b10000 << 10) | (rn << 5) | rd
+}
+fn fp_dp2(ftype: u32, opcode: u32, rm: u32, rn: u32, rd: u32) -> u32 {
+    FP_HDR | (ftype << 22) | (1 << 21) | (rm << 16) | (opcode << 12) | (0b10 << 10) | (rn << 5) | rd
+}
+fn fp_imm_enc(ftype: u32, imm8: u32, rd: u32) -> u32 {
+    FP_HDR | (ftype << 22) | (1 << 21) | (imm8 << 13) | (0b100 << 10) | rd
+}
+
+/// Scalar double-precision FP: arithmetic, sqrt, abs/neg, min/max, mov, and a
+/// move-immediate, recomputed each iteration (no accumulation, so the values
+/// stay finite). Compares the V registers, so a wrong FP result fails.
+#[wasm_bindgen_test]
+fn fp_arith() {
+    let code = [
+        fp_dp2(1, 0b0000, 1, 0, 2),  // FMUL d2, d0, d1
+        fp_dp2(1, 0b0010, 1, 0, 3),  // FADD d3, d0, d1
+        fp_dp2(1, 0b0011, 1, 0, 4),  // FSUB d4, d0, d1
+        fp_dp2(1, 0b0001, 1, 0, 5),  // FDIV d5, d0, d1
+        fp_dp1(1, 3, 0, 6),          // FSQRT d6, d0
+        fp_dp1(1, 2, 1, 7),          // FNEG d7, d1
+        fp_dp1(1, 1, 1, 8),          // FABS d8, d1
+        fp_dp2(1, 0b0100, 1, 0, 9),  // FMAX d9, d0, d1
+        fp_dp2(1, 0b0101, 1, 0, 10), // FMIN d10, d0, d1
+        fp_dp2(1, 0b1000, 1, 0, 11), // FNMUL d11, d0, d1
+        fp_dp1(1, 0, 0, 12),         // FMOV d12, d0
+        fp_imm_enc(1, 0b0111_0000, 13), // FMOV d13, #1.0
+        subs_imm(0, 0, 1),
+        cbnz(0, -52),
+    ];
+    let vs = [(0, u128::from(3.5f64.to_bits())), (1, u128::from((-2.25f64).to_bits()))];
+    crosscheck(&code, &[(0, 400)], &vs, 56, "fp_arith");
+}
+
+/// FP NaN/infinity canonicalization: ops that produce a NaN from non-NaN inputs
+/// (sqrt of a negative, 0/0, inf-inf) must yield the default NaN, matching the
+/// interpreter's DN=1 behaviour.
+#[wasm_bindgen_test]
+fn fp_nan() {
+    let code = [
+        fp_dp1(1, 3, 0, 2),          // FSQRT d2, d0   (d0 < 0 -> NaN)
+        fp_dp2(1, 0b0001, 1, 1, 3),  // FDIV  d3, d1, d1 (0/0 -> NaN)
+        fp_dp2(1, 0b0011, 4, 4, 5),  // FSUB  d5, d4, d4 (inf-inf -> NaN)
+        fp_dp2(1, 0b0010, 4, 0, 6),  // FADD  d6, d4, d0 (inf + finite -> inf)
+        subs_imm(0, 0, 1),
+        cbnz(0, -20),
+    ];
+    let vs = [
+        (0, u128::from((-1.0f64).to_bits())),
+        (1, 0u128),
+        (4, u128::from(f64::INFINITY.to_bits())),
+    ];
+    crosscheck(&code, &[(0, 400)], &vs, 24, "fp_nan");
+}
+
 // ---- Randomized-operand sweep over the lowered families. ----
 
 /// xorshift64* — deterministic so any failure is reproducible from the seed.

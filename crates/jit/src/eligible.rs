@@ -43,9 +43,10 @@ pub fn can_inline(insn: &Insn) -> bool {
         Insn::DataProc1Src { sf, opcode, .. } => is_inline_dp1(*sf, *opcode),
         Insn::DataProc2Src { opcode, .. } => is_inline_dp2(*opcode),
         Insn::DataProc3Src { op31, .. } => is_inline_dp3(*op31),
-        // SIMD eligibility is defined by the lowerings themselves (it reuses
-        // their decode helpers), so delegate; returns false for non-SIMD.
-        _ => crate::lower::is_inline_simd(insn),
+        // SIMD and scalar-FP eligibility are defined by their lowerings (which
+        // reuse the emitter's own decode helpers), so delegate; both return
+        // false for instructions outside their family.
+        _ => crate::lower::is_inline_simd(insn) || crate::lower::is_inline_fp(insn),
     }
 }
 

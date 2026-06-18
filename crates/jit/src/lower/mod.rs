@@ -32,6 +32,7 @@ mod atomic;
 mod common;
 mod cond;
 mod dataproc;
+mod fp;
 mod memory;
 mod simd;
 mod terminator;
@@ -45,6 +46,7 @@ use arith::BOp;
 
 pub(crate) use atomic::lower_atomic;
 pub(crate) use common::{SCRATCH_I32, SCRATCH_I64};
+pub(crate) use fp::is_inline_fp;
 pub(crate) use memory::{lower_mem, lower_mem_pair};
 pub(crate) use simd::is_inline_simd;
 pub(crate) use terminator::{lower_terminator, taken_target};
@@ -291,6 +293,9 @@ pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, entry_pc:
             let ok = dataproc::data_proc_3src(f, sf, op31, o0, rm, ra, rn, rd);
             return finish(f, pc, ok);
         }
+        Insn::FpDataProc1 { ftype, opcode, rn, rd } => fp::dp1(f, ftype, opcode, rn, rd),
+        Insn::FpDataProc2 { ftype, opcode, rm, rn, rd } => fp::dp2(f, ftype, opcode, rm, rn, rd),
+        Insn::FpImm { ftype, imm8, rd } => fp::imm(f, ftype, imm8, rd),
         // LoadStore / LoadStorePair are routed to `lower_mem` / `lower_mem_pair`
         // by the emitter (they need the TLB fast path + bail), never here.
         Insn::SimdThreeSame { q, u, size, opcode, rm, rn, rd } => {
