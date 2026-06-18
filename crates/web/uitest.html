@@ -4,13 +4,17 @@
   initramfs (virtio-gpu framebuffer + virtio-input keyboard/mouse) on the
   wasm-compiled emulator, JIT-accelerated.
 
+  The emulator runs in a Web Worker (uitest-worker.js) and draws straight into an
+  OffscreenCanvas, so this page's main thread only forwards input and shows the
+  serial console — it never blocks on emulation, so the UI stays smooth.
+
   Build the web bindings first, then serve the repo root over HTTP:
 
       crates/web/build.sh web
       python3 -m http.server 8000        # from the repo root
       # open http://localhost:8000/crates/web/uitest.html
 
-  (Must be served over HTTP — ES module + wasm fetch won't load from file://.)
+  (Must be served over HTTP — ES module worker + wasm fetch won't load from file://.)
 -->
 <html lang="en">
 <head>
@@ -47,23 +51,12 @@
 </main>
 
 <script type="module">
-import init, { Emulator } from './pkg-web/aarch64_web.js';
-
-const KERNEL  = '../../guest/prebuilt/Image-tiny';
-const INITRD  = '../../guest/prebuilt/uitest.cpio.gz';
-const BOOTARGS = 'earlycon=pl011,0x9000000 console=ttyAMA0 rdinit=/init';
-const CHUNK = 250_000;            // guest instructions per emulation chunk
-const FRAME_MS = 8;               // cap emulation to ~half the frame, leaving
-                                  // the rest for paint + input (avoids jank)
-
 const startBtn = document.getElementById('start');
 const jitBox   = document.getElementById('jit');
 const statsEl  = document.getElementById('stats');
 const consoleEl = document.getElementById('console');
 const canvas   = document.getElementById('screen');
-const ctx2d    = canvas.getContext('2d');
 
-const dec = new TextDecoder('latin1');
 function log(s) {
   const atBottom = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 4;
   consoleEl.textContent += s;
@@ -84,128 +77,81 @@ const KEYS = {
 };
 const BTN = { 0:0x110, 1:0x112, 2:0x111 }; // JS button -> BTN_LEFT/MIDDLE/RIGHT
 
-let emu = null;
+let worker = null;
 let running = false;
-let imageData = null;
-const t0Insns = { t: 0, n: 0 };
 
-async function fetchBytes(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch ${url}: ${r.status}`);
-  return new Uint8Array(await r.arrayBuffer());
+function fmtStats(m) {
+  const insns = `${(m.insns / 1e6).toFixed(1)}`.padStart(6) + 'M';
+  const mips = (m.mips ? m.mips.toFixed(0) : '—').padStart(4) + ' MIPS';
+  const mode = (m.jit ? `JIT ${m.cov.toFixed(0).padStart(3)}%` : 'interp').padStart(8);
+  statsEl.textContent = `${insns}  ${mips}  ${mode}`;
 }
 
-function drawFrame() {
-  const px = emu.take_frame();        // B8G8R8A8, empty if no new frame
-  if (px.length === 0) return;
-  const w = emu.fb_width(), h = emu.fb_height();
-  if (w === 0 || h === 0) return;
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w; canvas.height = h; imageData = null;
+function boot() {
+  if (!('transferControlToOffscreen' in canvas)) {
+    log('[error: this browser lacks OffscreenCanvas — try a recent Chrome/Firefox]\n');
+    return;
   }
-  if (!imageData || imageData.width !== w || imageData.height !== h) {
-    imageData = ctx2d.createImageData(w, h);
-  }
-  // BGRA -> RGBA, opaque, a word at a time. In memory the guest pixel is
-  // [B,G,R,A] (LE u32 = A<<24|R<<16|G<<8|B); canvas wants [R,G,B,A].
-  const src = new Uint32Array(px.buffer, px.byteOffset, px.length >> 2);
-  const dst = new Uint32Array(imageData.data.buffer);
-  for (let i = 0; i < src.length; i++) {
-    const v = src[i];
-    dst[i] = 0xff000000 | ((v & 0xff) << 16) | (v & 0x0000ff00) | ((v >> 16) & 0xff);
-  }
-  ctx2d.putImageData(imageData, 0, 0);
-}
+  startBtn.disabled = true;
+  startBtn.textContent = 'Booting…';
+  consoleEl.textContent = '';
 
-function frame() {
-  if (!running) return;
-  const useJit = jitBox.checked;
+  worker = new Worker('./uitest-worker.js', { type: 'module' });
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.ev === 'uart' || m.ev === 'log') log(m.text);
+    else if (m.ev === 'stats') fmtStats(m);
+    else if (m.ev === 'off') { log('\n[guest powered off]\n'); stop(); }
+  };
+  worker.onerror = (e) => { log(`\n[worker error: ${e.message}]\n`); stop(); };
 
-  // Run in small chunks bounded to ~FRAME_MS so paint + input stay responsive,
-  // and stop early once the guest goes idle (a chunk that doesn't fill means it
-  // hit WFI on poll()), so an idle guest costs almost nothing per frame.
-  const t = performance.now();
-  let status = 0;
-  do {
-    const before = Number(emu.total_insns());
-    status = useJit ? emu.run_jit(CHUNK) : emu.run(CHUNK);
-    const u = emu.take_uart();
-    if (u.length) log(dec.decode(u));
-    if (status === 1 || Number(emu.total_insns()) - before < CHUNK) break;
-  } while (performance.now() - t < FRAME_MS);
-
-  drawFrame();
-
-  // Stats: total instructions + a rolling MIPS estimate.
-  const now = performance.now();
-  const total = Number(emu.total_insns());
-  if (t0Insns.t === 0) { t0Insns.t = now; t0Insns.n = total; }
-  const dt = (now - t0Insns.t) / 1000;
-  const mips = dt > 0.25 ? ((total - t0Insns.n) / 1e6 / dt) : 0;
-  if (dt > 0.5) { t0Insns.t = now; t0Insns.n = total; }
-  const cov = total ? (100 * Number(emu.jit_insns()) / total).toFixed(0) : '0';
-  // Constant-width fields (with tabular-nums) so the readout doesn't shift.
-  const insns = `${(total / 1e6).toFixed(1)}`.padStart(6) + 'M';
-  const mipsStr = (mips ? mips.toFixed(0) : '—').padStart(4) + ' MIPS';
-  const mode = (useJit ? `JIT ${cov.padStart(3)}%` : 'interp').padStart(8);
-  statsEl.textContent = `${insns}  ${mipsStr}  ${mode}`;
-
-  if (status === 1) { log('\n[guest powered off]\n'); stop(); return; }
-  requestAnimationFrame(frame);
+  const offscreen = canvas.transferControlToOffscreen();
+  worker.postMessage({ cmd: 'start', canvas: offscreen }, [offscreen]);
+  worker.postMessage({ cmd: 'jit', on: jitBox.checked });
+  running = true;
 }
 
 function stop() {
   running = false;
-  startBtn.disabled = false;
-  startBtn.textContent = 'Boot';
-}
-
-async function boot() {
+  // The canvas control was transferred to the worker, so re-booting needs a
+  // fresh page; prompt for a reload rather than re-enabling Boot.
+  startBtn.textContent = 'Reload to re-boot';
   startBtn.disabled = true;
-  startBtn.textContent = 'Booting…';
-  consoleEl.textContent = '';
-  log('[loading wasm + guest image…]\n');
-  try {
-    await init();
-    const [image, initrd] = await Promise.all([fetchBytes(KERNEL), fetchBytes(INITRD)]);
-    emu = new Emulator();
-    emu.boot(image, initrd, BOOTARGS);
-    log(`[booted: kernel ${image.length} B, initrd ${initrd.length} B]\n`);
-    running = true;
-    t0Insns.t = 0;
-    requestAnimationFrame(frame);
-  } catch (e) {
-    log(`\n[error: ${e.message || e}]\n`);
-    stop();
-  }
 }
 
 startBtn.addEventListener('click', boot);
+jitBox.addEventListener('change', () => { if (worker) worker.postMessage({ cmd: 'jit', on: jitBox.checked }); });
 
-// --- input: forward keyboard/mouse to the guest while running ---
+// --- input: forward keyboard/mouse to the worker while running ---
 addEventListener('keydown', (e) => {
   if (!running) return;
   const code = KEYS[e.code];
-  if (code !== undefined) { emu.key(code, true); e.preventDefault(); }
+  if (code !== undefined) { worker.postMessage({ cmd: 'key', code, down: true }); e.preventDefault(); }
 });
 addEventListener('keyup', (e) => {
   if (!running) return;
   const code = KEYS[e.code];
-  if (code !== undefined) { emu.key(code, false); e.preventDefault(); }
+  if (code !== undefined) { worker.postMessage({ cmd: 'key', code, down: false }); e.preventDefault(); }
 });
 
 canvas.addEventListener('click', () => { if (running) canvas.requestPointerLock(); });
 canvas.addEventListener('mousemove', (e) => {
-  if (running && document.pointerLockElement === canvas) emu.mouse_motion(e.movementX, e.movementY, 0);
+  if (running && document.pointerLockElement === canvas)
+    worker.postMessage({ cmd: 'motion', dx: e.movementX, dy: e.movementY, wheel: 0 });
 });
 canvas.addEventListener('mousedown', (e) => {
-  if (running && document.pointerLockElement === canvas) { emu.mouse_button(BTN[e.button] ?? 0x110, true); e.preventDefault(); }
+  if (running && document.pointerLockElement === canvas) {
+    worker.postMessage({ cmd: 'button', code: BTN[e.button] ?? 0x110, down: true }); e.preventDefault();
+  }
 });
 addEventListener('mouseup', (e) => {
-  if (running && document.pointerLockElement === canvas) emu.mouse_button(BTN[e.button] ?? 0x110, false);
+  if (running && document.pointerLockElement === canvas)
+    worker.postMessage({ cmd: 'button', code: BTN[e.button] ?? 0x110, down: false });
 });
 canvas.addEventListener('wheel', (e) => {
-  if (running && document.pointerLockElement === canvas) { emu.mouse_motion(0, 0, e.deltaY < 0 ? 1 : -1); e.preventDefault(); }
+  if (running && document.pointerLockElement === canvas) {
+    worker.postMessage({ cmd: 'motion', dx: 0, dy: 0, wheel: e.deltaY < 0 ? 1 : -1 }); e.preventDefault();
+  }
 }, { passive: false });
 </script>
 </body>
