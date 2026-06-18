@@ -442,6 +442,10 @@ fn fcsel(ftype: u32, cond: u32, rm: u32, rn: u32, rd: u32) -> u32 {
 fn sub_imm(rd: u32, rn: u32, imm12: u32) -> u32 {
     0xD100_0000 | (imm12 << 10) | (rn << 5) | rd
 }
+/// FP<->integer conversion (SCVTF/UCVTF/FCVT*/FMOV gpr<->fp).
+fn fcvt_int(sf: u32, ftype: u32, rmode: u32, opcode: u32, rn: u32, rd: u32) -> u32 {
+    (sf << 31) | (0b11110 << 24) | (ftype << 22) | (1 << 21) | (rmode << 19) | (opcode << 16) | (rn << 5) | rd
+}
 
 /// Scalar double-precision FP: arithmetic, sqrt, abs/neg, min/max, mov, and a
 /// move-immediate, recomputed each iteration (no accumulation, so the values
@@ -512,6 +516,27 @@ fn fp_compare_select() {
         (7, u128::from(40.0f64.to_bits())),
     ];
     crosscheck(&code, &[(0, 400)], &vs, 24, "fp_cmpsel");
+}
+
+/// FP<->integer conversions and FMOV gpr<->fp: SCVTF/UCVTF (int->FP),
+/// FCVTZS/FCVTNU (FP->int, trunc & nearest, both widths), single and double, and
+/// an FMOV roundtrip. Compares the GPR and V results.
+#[wasm_bindgen_test]
+fn fp_conversions() {
+    let code = [
+        fcvt_int(1, 1, 0, 0b010, 1, 0),    // SCVTF d0, x1
+        fcvt_int(1, 1, 0b11, 0b000, 0, 2), // FCVTZS x2, d0   (toward zero)
+        fcvt_int(0, 1, 0b00, 0b001, 3, 4), // FCVTNU w4, d3   (nearest, unsigned)
+        fcvt_int(1, 0, 0, 0b011, 5, 6),    // UCVTF s6, x5    (single)
+        fcvt_int(0, 0, 0b11, 0b000, 6, 10), // FCVTZS w10, s6 (single -> int)
+        fcvt_int(1, 1, 0, 0b111, 7, 8),    // FMOV d8, x7     (gpr -> fp)
+        fcvt_int(1, 1, 0, 0b110, 8, 9),    // FMOV x9, d8     (fp -> gpr)
+        subs_imm(0, 0, 1),
+        cbnz(0, -32),
+    ];
+    let xs = [(0, 400u64), (1, 42), (5, 100), (7, 0x3FF0_0000_0000_0000)];
+    let vs = [(3, u128::from(3.7f64.to_bits()))];
+    crosscheck(&code, &xs, &vs, 36, "fp_conv");
 }
 
 // ---- Randomized-operand sweep over the lowered families. ----

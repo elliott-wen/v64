@@ -40,7 +40,114 @@ pub(crate) fn is_inline_fp(insn: &Insn) -> bool {
         | Insn::FpCompare { ftype, .. }
         | Insn::FpCondCompare { ftype, .. }
         | Insn::FpCondSelect { ftype, .. } => *ftype <= 1,
+        // SCVTF/UCVTF, FCVT{N,P,M,Z}{S,U}, FMOV gpr<->fp. Tie-away (FCVTA*,
+        // opcode 100/101) has no wasm rounding op and falls back; ftype 10/11
+        // (vector-high FMOV, half-precision) too.
+        Insn::FpCvtInt { ftype, opcode, .. } => {
+            *ftype <= 1 && matches!(opcode, 0b000 | 0b001 | 0b010 | 0b011 | 0b110 | 0b111)
+        }
         _ => false,
+    }
+}
+
+/// FpCvtInt — integer<->FP conversions and FMOV between a GPR and an FP register.
+pub(crate) fn cvt_int(f: &mut Function, sf: bool, ftype: u8, rmode: u8, opcode: u8, rn: u8, rd: u8) {
+    let single = ftype == 0;
+    match opcode {
+        0b010 | 0b011 => scvtf(f, sf, single, opcode == 0b010, rn, rd), // int -> FP
+        0b000 | 0b001 => fcvt_to_int(f, sf, single, opcode == 0b000, rmode, rn, rd),
+        0b110 => {
+            // FMOV FP -> GPR (raw bits; W<->S takes the low 32, X<->D the low 64).
+            if sf {
+                emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(offsets::v(rn as usize))), I::LocalSet(T0));
+            } else {
+                emit!(f, I::LocalGet(REGS_BASE), I::I32Load(at(offsets::v(rn as usize))), I::I64ExtendI32U, I::LocalSet(T0));
+            }
+            if rd != 31 {
+                emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T0), I::I64Store(at(offsets::x(rd as usize))));
+            }
+        }
+        _ => {
+            // FMOV GPR -> FP (opcode 111).
+            push_gpr(f, rn);
+            emit!(f, I::LocalSet(T0));
+            write_t0(f, single, rd);
+        }
+    }
+}
+
+/// SCVTF/UCVTF — integer in `rn` to FP in `rd` (round to nearest; never NaN).
+fn scvtf(f: &mut Function, sf: bool, single: bool, signed: bool, rn: u8, rd: u8) {
+    push_gpr(f, rn);
+    if !sf {
+        emit!(f, I::I32WrapI64);
+    }
+    emit!(
+        f,
+        match (single, sf, signed) {
+            (true, true, true) => I::F32ConvertI64S,
+            (true, true, false) => I::F32ConvertI64U,
+            (true, false, true) => I::F32ConvertI32S,
+            (true, false, false) => I::F32ConvertI32U,
+            (false, true, true) => I::F64ConvertI64S,
+            (false, true, false) => I::F64ConvertI64U,
+            (false, false, true) => I::F64ConvertI32S,
+            (false, false, false) => I::F64ConvertI32U,
+        }
+    );
+    // Bits -> T0, then a scalar FP write (zeroing the rest of Vd).
+    if single {
+        emit!(f, I::I32ReinterpretF32, I::I64ExtendI32U, I::LocalSet(T0));
+    } else {
+        emit!(f, I::I64ReinterpretF64, I::LocalSet(T0));
+    }
+    write_t0(f, single, rd);
+}
+
+/// FCVT{N,P,M,Z}{S,U} — FP in `rn` to integer in `rd`: round per `rmode` on the
+/// source-width float, then truncate-saturate (NaN -> 0, out-of-range saturates,
+/// like Rust's `as`). Tie-away (FCVTA*) is gated out (no wasm round op).
+fn fcvt_to_int(f: &mut Function, sf: bool, single: bool, signed: bool, rmode: u8, rn: u8, rd: u8) {
+    read(f, single, rn);
+    // rmode 0=nearest, 1=ceil(+inf), 2=floor(-inf), 3=trunc (toward zero). For
+    // trunc, trunc_sat already truncates, so no separate round is emitted.
+    match (rmode, single) {
+        (0, true) => emit!(f, I::F32Nearest),
+        (0, false) => emit!(f, I::F64Nearest),
+        (1, true) => emit!(f, I::F32Ceil),
+        (1, false) => emit!(f, I::F64Ceil),
+        (2, true) => emit!(f, I::F32Floor),
+        (2, false) => emit!(f, I::F64Floor),
+        _ => {}
+    }
+    emit!(
+        f,
+        match (single, sf, signed) {
+            (true, true, true) => I::I64TruncSatF32S,
+            (true, true, false) => I::I64TruncSatF32U,
+            (true, false, true) => I::I32TruncSatF32S,
+            (true, false, false) => I::I32TruncSatF32U,
+            (false, true, true) => I::I64TruncSatF64S,
+            (false, true, false) => I::I64TruncSatF64U,
+            (false, false, true) => I::I32TruncSatF64S,
+            (false, false, false) => I::I32TruncSatF64U,
+        }
+    );
+    if !sf {
+        emit!(f, I::I64ExtendI32U); // W result zero-extends into X
+    }
+    emit!(f, I::LocalSet(T0));
+    if rd != 31 {
+        emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T0), I::I64Store(at(offsets::x(rd as usize))));
+    }
+}
+
+/// Push X[rn] as i64 (0 for r31 = XZR).
+fn push_gpr(f: &mut Function, rn: u8) {
+    if rn == 31 {
+        emit!(f, I::I64Const(0));
+    } else {
+        emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(offsets::x(rn as usize))));
     }
 }
 
