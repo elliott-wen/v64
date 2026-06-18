@@ -101,6 +101,15 @@ fn madd(rd: u32, rn: u32, rm: u32, ra: u32) -> u32 {
 fn udiv(rd: u32, rn: u32, rm: u32) -> u32 {
     0x9AC0_0800 | (rm << 16) | (rn << 5) | rd
 }
+fn sdiv(rd: u32, rn: u32, rm: u32) -> u32 {
+    0x9AC0_0C00 | (rm << 16) | (rn << 5) | rd
+}
+fn udiv_w(rd: u32, rn: u32, rm: u32) -> u32 {
+    0x1AC0_0800 | (rm << 16) | (rn << 5) | rd
+}
+fn sdiv_w(rd: u32, rn: u32, rm: u32) -> u32 {
+    0x1AC0_0C00 | (rm << 16) | (rn << 5) | rd
+}
 fn csel(rd: u32, rn: u32, rm: u32, cond: u32) -> u32 {
     0x9A80_0000 | (rm << 16) | (cond << 12) | (rn << 5) | rd
 }
@@ -253,6 +262,55 @@ fn simd_vector_add() {
 }
 
 #[wasm_bindgen_test]
+fn division_edge_cases() {
+    // AArch64 defines x/0 == 0 and SDIV(INT_MIN, -1) == INT_MIN; wasm `i64.div_*`
+    // *traps* on both, so the lowering must guard them. A bug here makes the
+    // compiled block trap (caught as a JIT-vs-interp divergence / failure).
+    let code = [
+        sdiv(5, 1, 2), // INT_MIN / -1  -> INT_MIN
+        udiv(6, 4, 3), // 100 / 0       -> 0
+        sdiv(7, 4, 3), // 100 / 0       -> 0
+        subs_imm(0, 0, 1),
+        cbnz(0, -16),
+    ];
+    let xs = [
+        (0, 500u64),
+        (1, 0x8000_0000_0000_0000),
+        (2, 0xFFFF_FFFF_FFFF_FFFF),
+        (3, 0),
+        (4, 100),
+        (5, 0),
+        (6, 0),
+        (7, 0),
+    ];
+    crosscheck(&code, &xs, &[], 20, "division_edge");
+}
+
+#[wasm_bindgen_test]
+fn division_edge_cases_w() {
+    // Same guards at 32-bit width: W INT_MIN/-1 and W x/0. Results zero-extend to
+    // 64 bits, so the lowering must mask to 32 bits *and* guard the trap cases.
+    let code = [
+        sdiv_w(5, 1, 2), // (i32)0x8000_0000 / -1 -> 0x8000_0000 (zero-ext to X)
+        udiv_w(6, 4, 3), // 100 / 0 -> 0
+        sdiv_w(7, 4, 3), // 100 / 0 -> 0
+        subs_imm(0, 0, 1),
+        cbnz(0, -16),
+    ];
+    let xs = [
+        (0, 500u64),
+        (1, 0x8000_0000),       // W INT_MIN
+        (2, 0xFFFF_FFFF),       // W -1
+        (3, 0),
+        (4, 100),
+        (5, 0),
+        (6, 0),
+        (7, 0),
+    ];
+    crosscheck(&code, &xs, &[], 20, "division_edge_w");
+}
+
+#[wasm_bindgen_test]
 fn memory_loads_stores_mmu_on() {
     let data = RAM_BASE + 0x4000;
     let code = [
@@ -303,10 +361,12 @@ fn vreg(rng: &mut Rng) -> u32 {
     rng.below(16)
 }
 
-/// A random valid integer data-processing instruction over safe registers.
+/// A random valid integer data-processing instruction over safe registers
+/// (x1..x15), spanning arith/logical/carry, mul/div, variable shifts, bitfield,
+/// EXTR, and 1-source ops.
 fn rand_dp(rng: &mut Rng) -> u32 {
     let (rd, rn, rm) = (greg(rng), greg(rng), greg(rng));
-    match rng.below(12) {
+    match rng.below(21) {
         0 => 0x8B00_0000 | (rm << 16) | (rn << 5) | rd,  // ADD
         1 => 0xCB00_0000 | (rm << 16) | (rn << 5) | rd,  // SUB
         2 => 0x8A00_0000 | (rm << 16) | (rn << 5) | rd,  // AND
@@ -314,46 +374,115 @@ fn rand_dp(rng: &mut Rng) -> u32 {
         4 => 0xCA00_0000 | (rm << 16) | (rn << 5) | rd,  // EOR
         5 => 0xAB00_0000 | (rm << 16) | (rn << 5) | rd,  // ADDS
         6 => 0xEB00_0000 | (rm << 16) | (rn << 5) | rd,  // SUBS
-        7 => 0x9B00_0000 | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MADD
-        8 => 0x9AC0_0800 | (rm << 16) | (rn << 5) | rd,  // UDIV (÷0 -> 0, defined)
-        9 => 0x9AC0_0C00 | (rm << 16) | (rn << 5) | rd,  // SDIV
-        10 => 0x9AC0_2000 | (rm << 16) | (rn << 5) | rd, // LSLV
-        _ => 0x9A80_0000 | (rm << 16) | (rng.below(16) << 12) | (rn << 5) | rd, // CSEL
+        7 => 0x9A00_0000 | (rm << 16) | (rn << 5) | rd,  // ADC
+        8 => 0xDA00_0000 | (rm << 16) | (rn << 5) | rd,  // SBC
+        9 => 0x9B00_0000 | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MADD
+        10 => 0x9B00_8000 | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MSUB
+        11 => 0x9AC0_0800 | (rm << 16) | (rn << 5) | rd, // UDIV (÷0 -> 0, defined)
+        12 => 0x9AC0_0C00 | (rm << 16) | (rn << 5) | rd, // SDIV
+        13 => 0x9AC0_2000 | (rm << 16) | (rn << 5) | rd, // LSLV
+        14 => 0x9AC0_2400 | (rm << 16) | (rn << 5) | rd, // LSRV
+        15 => 0x9AC0_2800 | (rm << 16) | (rn << 5) | rd, // ASRV
+        16 => 0x9AC0_2C00 | (rm << 16) | (rn << 5) | rd, // RORV
+        17 => 0x9A80_0000 | (rm << 16) | (rng.below(16) << 12) | (rn << 5) | rd, // CSEL
+        18 => {
+            // Bitfield: UBFM / SBFM / BFM (64-bit, N=1), random immr/imms.
+            let base = [0xD340_0000u32, 0x9340_0000, 0xB340_0000][rng.below(3) as usize];
+            base | (rng.below(64) << 16) | (rng.below(64) << 10) | (rn << 5) | rd
+        }
+        19 => 0x93C0_0000 | (rm << 16) | (rng.below(64) << 10) | (rn << 5) | rd, // EXTR
+        _ => {
+            // Data-proc 1-source: RBIT/REV16/REV32/REV/CLZ/CLS.
+            let op = [0u32, 1, 2, 3, 4, 5][rng.below(6) as usize];
+            0xDAC0_0000 | (op << 10) | (rn << 5) | rd
+        }
     }
 }
 
-/// A random valid SIMD three-same instruction over safe vector registers; every
-/// form chosen here is inline-lowered by the JIT.
+/// A random valid SIMD instruction over safe vector registers (v0..v15):
+/// three-same, two-register-misc, and shift-by-immediate (byte lanes).
 fn rand_simd(rng: &mut Rng) -> u32 {
     let (rd, rn, rm) = (vreg(rng), vreg(rng), vreg(rng));
-    let mut q = rng.below(2);
-    let (u, size, opcode) = match rng.below(6) {
+    let q = rng.below(2);
+    match rng.below(3) {
         0 => {
-            let s = rng.below(4); // ADD: 2D (size 3) needs Q=1
-            if s == 3 {
-                q = 1;
-            }
-            (0, s, 0b10000)
+            // three-same: ADD/SUB (any size, 2D needs Q=1), MUL, AND/ORR/EOR.
+            let mut q = q;
+            let (u, size, opcode) = match rng.below(6) {
+                0 => {
+                    let s = rng.below(4);
+                    if s == 3 {
+                        q = 1;
+                    }
+                    (0, s, 0b10000) // ADD
+                }
+                1 => {
+                    let s = rng.below(4);
+                    if s == 3 {
+                        q = 1;
+                    }
+                    (1, s, 0b10000) // SUB
+                }
+                2 => (0, rng.below(3), 0b10011), // MUL (no 2D)
+                3 => (0, 0b00, 0b00011),         // AND
+                4 => (0, 0b10, 0b00011),         // ORR
+                _ => (1, 0b00, 0b00011),         // EOR
+            };
+            three_same(q, u, size, opcode, rd, rn, rm)
         }
         1 => {
-            let s = rng.below(4); // SUB
-            if s == 3 {
-                q = 1;
-            }
-            (1, s, 0b10000)
+            // two-register-misc: NEG/ABS/NOT/CNT/CMEQ0/CMGT0/REV64.
+            let mut q = q;
+            let (u, opcode, size) = match rng.below(7) {
+                0 => {
+                    let s = rng.below(4);
+                    if s == 3 {
+                        q = 1;
+                    }
+                    (1, 0b01011, s) // NEG
+                }
+                1 => {
+                    let s = rng.below(4);
+                    if s == 3 {
+                        q = 1;
+                    }
+                    (0, 0b01011, s) // ABS
+                }
+                2 => (1, 0b00101, 0), // NOT
+                3 => (0, 0b00101, 0), // CNT
+                4 => {
+                    let s = rng.below(4);
+                    if s == 3 {
+                        q = 1;
+                    }
+                    (0, 0b01001, s) // CMEQ #0
+                }
+                5 => {
+                    let s = rng.below(4);
+                    if s == 3 {
+                        q = 1;
+                    }
+                    (0, 0b01000, s) // CMGT #0
+                }
+                _ => (0, 0b00000, rng.below(3)), // REV64 (size 0..2)
+            };
+            (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22)
+                | (0b10000 << 17) | (opcode << 12) | (0b10 << 10) | (rn << 5) | rd
         }
-        2 => (0, rng.below(3), 0b10011), // MUL (no 2D)
-        3 => (0, 0b00, 0b00011),         // AND
-        4 => (0, 0b10, 0b00011),         // ORR
-        _ => (1, 0b00, 0b00011),         // EOR
-    };
-    three_same(q, u, size, opcode, rd, rn, rm)
+        _ => {
+            // shift-by-immediate, byte lanes (immh=0001): SHL / SSHR / USHR.
+            let immb = rng.below(8);
+            let (u, opcode) = [(0u32, 0b01010u32), (0, 0b00000), (1, 0b00000)][rng.below(3) as usize];
+            (q << 30) | (u << 29) | (0b011110 << 23) | (1 << 19) | (immb << 16)
+                | (opcode << 11) | (1 << 10) | (rn << 5) | rd
+        }
+    }
 }
 
 #[wasm_bindgen_test]
 fn random_lowering_sweep() {
     let mut rng = Rng::new(0xC0FFEE_1234);
-    for i in 0..192u32 {
+    for i in 0..600u32 {
         let simd = i & 1 == 0;
         let w = if simd { rand_simd(&mut rng) } else { rand_dp(&mut rng) };
         // [W ; subs x0,#1 ; cbnz x0] — W over x1..x15 / v0..v15 can't touch x0.
