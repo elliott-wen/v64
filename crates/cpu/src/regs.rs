@@ -1,39 +1,18 @@
-//! Flat, offset-addressable guest register block for the JIT.
+//! Byte offsets of the JIT-addressable guest registers.
 //!
 //! Generated WASM reads/writes guest registers as loads/stores at *constant
-//! offsets* into a copy of this struct held in the wasmtime instance's linear
-//! memory. The layout is `#[repr(C)]` and pinned by the offset table below
-//! (`offsets`), with a unit test that fails if any offset shifts.
+//! offsets* into the live [`crate::CpuState`], which shares the block's linear
+//! memory. `CpuState` is `#[repr(C)]` with its leading register fields pinned to
+//! the [`offsets`] table here, asserted at compile time in `state.rs` — so a
+//! block mutates the real registers in place with no image copy.
 //!
-//! `nzcv` is the **packed** condition-flag word (N=bit31, Z=bit30, C=bit29,
-//! V=bit28), not the interpreter's four-bool [`crate::Flags`]. The interpreter
-//! keeps working with `Flags`; conversion happens only at the JIT boundary via
-//! [`crate::CpuState::to_guest_regs`] / [`crate::CpuState::load_guest_regs`].
+//! The block works in the **packed** condition-flag word `nzcv` (N=bit31,
+//! Z=bit30, C=bit29, V=bit28), not the interpreter's four-bool [`crate::Flags`];
+//! the organizer packs/unpacks the one `u64` around a block run.
 
-/// The hot, raw-memory-addressable register file the JIT operates on.
-#[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuestRegs {
-    /// X0..X30. X31 is SP or XZR depending on the instruction (not stored here).
-    pub x: [u64; 31],
-    pub sp: u64,
-    pub pc: u64,
-    /// Packed NZCV (bit31 N, bit30 Z, bit29 C, bit28 V).
-    pub nzcv: u64,
-    /// SIMD/FP registers V0..V31 (128-bit).
-    pub v: [u128; 32],
-    /// Floating-point control register.
-    pub fpcr: u64,
-}
-
-impl Default for GuestRegs {
-    fn default() -> Self {
-        Self { x: [0; 31], sp: 0, pc: 0, nzcv: 0, v: [0; 32], fpcr: 0 }
-    }
-}
-
-/// Byte offsets of each field within [`GuestRegs`], shared by the JIT emitter
-/// and the runtime. Pinned by `tests::offsets_are_stable`.
+/// Byte offsets of each JIT-addressable register field within [`crate::CpuState`]
+/// (`x`, `sp`, `pc`, `nzcv`, `v`), shared by the JIT emitter and the organizer.
+/// Pinned by the `#[repr(C)]` offset asserts in `state.rs`.
 pub mod offsets {
     pub const X: usize = 0;
     pub const SP: usize = 248; // 31 * 8

@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use crate::flags::Flags;
-use crate::regs::GuestRegs;
 use crate::tlb::Tlb;
 
 /// Encoded register index that aliases SP or the zero register.
@@ -143,8 +142,8 @@ const _: () = {
 
 /// Byte offset of [`CpuState::jit_count`] within `CpuState`, for the JIT emitter
 /// to store the per-block instruction count a block executed (it shares the
-/// `#[repr(C)]` layout via the asserts above). Not a `GuestRegs` field — it's
-/// past the architectural register window.
+/// `#[repr(C)]` layout via the asserts above). Not an architectural register —
+/// it's past the register window the offset table covers.
 pub const JIT_COUNT_OFFSET: usize = std::mem::offset_of!(CpuState, jit_count);
 
 /// Byte offset of [`CpuState::jit_exit`] — the block's mid-way bail flag.
@@ -299,30 +298,5 @@ impl CpuState {
         let el = ((v >> 2) & 0x3) as u8;
         let spsel = v & 1 == 1;
         self.set_el_spsel(el, spsel);
-    }
-
-    /// Snapshot the hot register file into the flat [`GuestRegs`] image the JIT
-    /// operates on (packing `flags` into `nzcv`).
-    #[must_use]
-    pub fn to_guest_regs(&self) -> GuestRegs {
-        GuestRegs {
-            x: self.x,
-            sp: self.sp,
-            pc: self.pc,
-            nzcv: self.flags.to_nzcv(),
-            v: self.v,
-            fpcr: self.fpcr,
-        }
-    }
-
-    /// Load the hot register file back from a [`GuestRegs`] image (the JIT writes
-    /// `nzcv`; unpack it into `flags`). Cold state (sysregs/EL/...) is untouched.
-    pub fn load_guest_regs(&mut self, r: &GuestRegs) {
-        self.x = r.x;
-        self.sp = r.sp;
-        self.pc = r.pc;
-        self.flags = Flags::from_nzcv(r.nzcv);
-        self.v = r.v;
-        self.fpcr = r.fpcr;
     }
 }

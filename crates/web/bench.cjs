@@ -30,7 +30,9 @@ function bench(useJit) {
   const insns = Number(emu.total_insns());
   const jit = Number(emu.jit_insns());
   const calls = Number(emu.jit_calls());
-  return { secs, insns, jit, calls, stopped };
+  const regions = Number(emu.jit_regions());
+  const regionBlocks = Number(emu.jit_region_blocks());
+  return { secs, insns, jit, calls, regions, regionBlocks, stopped };
 }
 
 console.log(`budget ${(BUDGET / 1e6).toFixed(0)}M instructions, batch ${(BATCH / 1e6).toFixed(0)}M\n`);
@@ -41,7 +43,8 @@ console.log(`interp : ${(i.insns / 1e6 / i.secs).toFixed(1)} MIPS  (${i.insns} i
 const j = bench(true);
 const cov = ((j.jit / j.insns) * 100).toFixed(1);
 const avgLen = (j.jit / j.calls).toFixed(1);
-console.log(`jit    : ${(j.insns / 1e6 / j.secs).toFixed(1)} MIPS  (${j.insns} insns in ${j.secs.toFixed(2)}s, ${cov}% via ${j.calls} block calls, avg ${avgLen} insns/call)`);
+const avgRegion = (j.regionBlocks / j.regions).toFixed(1);
+console.log(`jit    : ${(j.insns / 1e6 / j.secs).toFixed(1)} MIPS  (${j.insns} insns in ${j.secs.toFixed(2)}s, ${cov}% via ${j.calls} calls, avg ${avgLen} insns/call, ${avgRegion} blocks/region)`);
 
 const interpRate = i.insns / i.secs, jitRate = j.insns / j.secs;
 const ratio = jitRate >= interpRate ? jitRate / interpRate : interpRate / jitRate;

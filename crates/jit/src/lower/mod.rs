@@ -141,6 +141,9 @@ pub(crate) fn emit_region_body(region: &crate::Region, ram_phys: u64, ram_size: 
     prologue(&mut f); // PC0 = runtime region-entry PC
     emit!(f, I::LocalGet(common::PC0), I::LocalSet(common::RPC));
 
+    // RIDX (the dispatch index) is zero-initialised = the entry block, index 0.
+    let k = region.blocks.len();
+
     emit!(f, I::Loop(BlockType::Empty)); // $top
     // safety: yield after MAX_REGION_ITERS block transitions
     emit!(
@@ -154,16 +157,22 @@ pub(crate) fn emit_region_body(region: &crate::Region, ram_phys: u64, ram_size: 
     emit!(f, I::End);
     emit!(f, I::LocalGet(common::RITERS), I::I32Const(1), I::I32Add, I::LocalSet(common::RITERS));
 
-    // dispatch if-chain: run a block when RPC equals its entry.
-    for block in &region.blocks {
-        emit!(f, I::LocalGet(common::RPC));
-        common::gen_rel_pc(&mut f, block.start, region.entry);
-        emit!(f, I::I64Eq, I::If(BlockType::Empty));
-        emit_region_block(&mut f, block, region, ram_phys, ram_size);
-        emit!(f, I::End);
+    // O(1) dispatch: a `br_table` on RIDX jumps to the matching block. The classic
+    // nested-block trampoline — `k+1` blocks (one per block, plus a default);
+    // `br_table` index i lands just past the i-th `end`, where block i's code is.
+    for _ in 0..=k {
+        emit!(f, I::Block(BlockType::Empty));
     }
-    // default: RPC isn't a known block entry — leave the region.
-    region_exit(&mut f);
+    let targets: Vec<u32> = (0..k as u32).collect();
+    emit!(f, I::LocalGet(common::RIDX), I::BrTable(targets.into(), k as u32));
+    for (i, block) in region.blocks.iter().enumerate() {
+        emit!(f, I::End); // close the i-th-innermost dispatch block
+        // From here, `k - i` blocks remain open before `$top`, so `br (k - i)`
+        // re-dispatches; one deeper (`+1`) inside a conditional terminator's `if`.
+        emit_region_block(&mut f, block, region, ram_phys, ram_size, (k - i) as u32);
+    }
+    emit!(f, I::End); // close the default block
+    region_exit(&mut f); // default: RIDX out of range (never happens) — leave.
     emit!(f, I::End); // end $top
     emit!(f, I::Unreachable);
     f.instruction(&I::End);
@@ -195,8 +204,18 @@ fn store_reg_pc(f: &mut Function, reg: usize, abs: u64, entry: u64) {
 }
 
 /// Emit one block inside the dispatch loop: its body, the `RCOUNT += len`, and
-/// the terminator routing (continue in-region via `br $top`, or exit via return).
-fn emit_region_block(f: &mut Function, block: &Block, region: &crate::Region, ram_phys: u64, ram_size: u64) {
+/// the terminator routing. An in-region branch sets RIDX (the target block index)
+/// + RPC and `br`s to `$top` (`loop_depth` levels out, `+1` inside a conditional
+/// `if`); an out-of-region / indirect / call / fall-through-to-non-inline branch
+/// returns the PC (exits). RIDX makes re-dispatch O(1) via the `br_table`.
+fn emit_region_block(
+    f: &mut Function,
+    block: &Block,
+    region: &crate::Region,
+    ram_phys: u64,
+    ram_size: u64,
+    loop_depth: u32,
+) {
     let entry = region.entry;
     let n = block.insns.len();
     let pc = block.insns[n - 1].0;
@@ -217,7 +236,6 @@ fn emit_region_block(f: &mut Function, block: &Block, region: &crate::Region, ra
     // The whole block (incl. its terminator branch, if any) retired.
     emit!(f, I::LocalGet(common::RCOUNT), I::I64Const(n as i64), I::I64Add, I::LocalSet(common::RCOUNT));
 
-    let in_region = |t: u64| region.blocks.iter().any(|b| b.start == t);
     if !has_term {
         // Ran to a non-inline instruction at pc+4: exit so the organizer runs it.
         set_rpc(f, pc.wrapping_add(4), entry);
@@ -226,13 +244,7 @@ fn emit_region_block(f: &mut Function, block: &Block, region: &crate::Region, ra
     }
     match term {
         Insn::BranchImm { link: false, offset } => {
-            let target = pc.wrapping_add(offset as u64);
-            set_rpc(f, target, entry);
-            if in_region(target) {
-                emit!(f, I::Br(1)); // -> $top (enclosing: dispatch-if, loop)
-            } else {
-                region_exit(f);
-            }
+            region_route(f, pc.wrapping_add(offset as u64), entry, region, loop_depth);
         }
         Insn::BranchImm { link: true, offset } => {
             // BL: a call leaves the region; set the link register, then exit.
@@ -261,9 +273,9 @@ fn emit_region_block(f: &mut Function, block: &Block, region: &crate::Region, ra
             let ft = pc.wrapping_add(4);
             terminator::emit_taken_cond(f, &term); // i32: 1 = take the branch
             emit!(f, I::If(BlockType::Empty));
-            region_route(f, taken, entry, in_region(taken));
+            region_route(f, taken, entry, region, loop_depth + 1); // +1: inside the `if`
             emit!(f, I::Else);
-            region_route(f, ft, entry, in_region(ft));
+            region_route(f, ft, entry, region, loop_depth + 1);
             emit!(f, I::End);
         }
         _ => {
@@ -274,13 +286,16 @@ fn emit_region_block(f: &mut Function, block: &Block, region: &crate::Region, ra
     }
 }
 
-/// One arm of a conditional terminator: continue in-region (`br $top`, depth 2 —
-/// enclosing cond-if, dispatch-if, loop) or exit.
-fn region_route(f: &mut Function, target: u64, entry: u64, in_region: bool) {
-    set_rpc(f, target, entry);
-    if in_region {
-        emit!(f, I::Br(2));
+/// Route a terminator edge to `target`: if `target` is an in-region block, set
+/// RIDX to its index + RPC and `br loop_depth` to re-dispatch (stay in compiled
+/// code); otherwise set RPC and return (leave the region).
+fn region_route(f: &mut Function, target: u64, entry: u64, region: &crate::Region, loop_depth: u32) {
+    if let Some(idx) = region.blocks.iter().position(|b| b.start == target) {
+        emit!(f, I::I32Const(idx as i32), I::LocalSet(common::RIDX));
+        set_rpc(f, target, entry);
+        emit!(f, I::Br(loop_depth));
     } else {
+        set_rpc(f, target, entry);
         region_exit(f);
     }
 }

@@ -87,6 +87,12 @@ pub struct Machine {
     /// Number of hot-block invocations (for average-block-length reporting).
     #[cfg(feature = "jit")]
     jit_calls: u64,
+    /// Regions compiled, and the total basic blocks across them — their ratio is
+    /// the average region size (how much the if-chain dispatch scans).
+    #[cfg(feature = "jit")]
+    jit_regions: u64,
+    #[cfg(feature = "jit")]
+    jit_region_blocks: u64,
     /// JIT organizer state: per-physical-address block classification
     /// (cold/hot/plain). See [`jit`]. Compiled blocks read/write the live
     /// `CpuState` directly (it's `#[repr(C)]` in shared linear memory), so there
@@ -125,6 +131,10 @@ impl Machine {
             jit_insns: 0,
             #[cfg(feature = "jit")]
             jit_calls: 0,
+            #[cfg(feature = "jit")]
+            jit_regions: 0,
+            #[cfg(feature = "jit")]
+            jit_region_blocks: 0,
             #[cfg(feature = "jit")]
             jit_cache: jit::JitCache::default(),
         }

@@ -174,4 +174,12 @@ impl Emulator {
     pub fn jit_calls(&self) -> u64 {
         self.board.machine.jit_calls()
     }
+
+    /// Regions compiled and total blocks across them (avg region size = ratio).
+    pub fn jit_regions(&self) -> u64 {
+        self.board.machine.jit_regions()
+    }
+    pub fn jit_region_blocks(&self) -> u64 {
+        self.board.machine.jit_region_blocks()
+    }
 }

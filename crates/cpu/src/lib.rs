@@ -10,7 +10,6 @@ mod state;
 mod tlb;
 
 pub use flags::Flags;
-pub use regs::GuestRegs;
 pub use state::{
     Abort, CpuState, EL_OFFSET, JIT_COUNT_OFFSET, JIT_EXIT_OFFSET, SP_OR_ZR, TLB_OFFSET,
 };

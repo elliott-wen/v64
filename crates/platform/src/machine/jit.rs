@@ -107,6 +107,17 @@ impl Machine {
         self.jit_calls
     }
 
+    /// Regions compiled and total basic blocks across them; the ratio is the
+    /// average region size (how far the dispatch if-chain scans).
+    #[must_use]
+    pub fn jit_regions(&self) -> u64 {
+        self.jit_regions
+    }
+    #[must_use]
+    pub fn jit_region_blocks(&self) -> u64 {
+        self.jit_region_blocks
+    }
+
     /// JIT-organized run: same stop contract as [`run`](Self::run), but each
     /// iteration either runs a hot compiled block (via `runner`) or interprets
     /// one instruction. Cold blocks are interpreted while a hotness counter
@@ -209,6 +220,8 @@ impl Machine {
                     self.jit_cache.insert(pa, JitBlock::Plain); // a lone non-inline op
                     return None;
                 }
+                self.jit_regions += 1;
+                self.jit_region_blocks += region.blocks.len() as u64;
                 let (_, ram_phys, ram_size) = self.bus.ram_jit_info();
                 // A single-block region needs no dispatch loop — emit it directly.
                 let wasm = if region.blocks.len() == 1 {
