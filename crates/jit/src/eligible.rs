@@ -94,15 +94,17 @@ pub fn is_inline_mem(insn: &Insn) -> bool {
     is_inline_load_store(insn) || is_inline_load_store_pair(insn) || is_inline_atomic(insn)
 }
 
-/// True for the LSE atomics [`crate::lower::lower_atomic`] inlines: read-modify-
-/// write (`LDADD`/`LDCLR`/`LDEOR`/`LDSET`/`LD{S,U}{MAX,MIN}`/`SWP`) and
-/// compare-and-swap, at 1/2/4/8-byte widths. The exclusive-monitor forms
-/// (`LDXR`/`STXR`) keep their monitor state in the interpreter.
+/// True for the atomics [`crate::lower::lower_atomic`] inlines: LSE read-modify-
+/// write (`LDADD`/`LDCLR`/`LDEOR`/`LDSET`/`LD{S,U}{MAX,MIN}`/`SWP`),
+/// compare-and-swap, and the LL/SC exclusives (`LDXR`/`STXR`), at 1/2/4/8-byte
+/// widths. The exclusive *pair* forms (`LDXP`/`STXP`) stay in the interpreter.
 #[must_use]
 pub fn is_inline_atomic(insn: &Insn) -> bool {
     match insn {
         Insn::AtomicRmw { size, op, .. } => *size <= 3 && *op <= 8,
-        Insn::CompareSwap { size, .. } => *size <= 3,
+        Insn::CompareSwap { size, .. } | Insn::LoadExclusive { size, .. } | Insn::StoreExclusive { size, .. } => {
+            *size <= 3
+        }
         _ => false,
     }
 }

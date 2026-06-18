@@ -84,9 +84,15 @@ pub struct CpuState {
     /// exception flags (IOC/DZC/OFC/UFC/IXC, bits 0..=4); they are observational
     /// only (no FP result depends on them and we don't trap FP exceptions).
     pub fpsr: u64,
-    /// Exclusive monitor: `(address, value)` recorded by LDXR; a later STXR to
-    /// the same address succeeds only if memory still holds `value`.
-    pub excl: Option<(u64, u64)>,
+    /// Exclusive monitor, as explicit fields (not an `Option`) so the JIT can
+    /// read/write them at fixed offsets: LDXR records the armed address/value
+    /// and sets `excl_valid`; a later STXR to the same address succeeds only if
+    /// `excl_valid` and memory still holds `excl_val`. Use [`CpuState::arm_excl`]
+    /// / [`CpuState::clear_excl`] / [`CpuState::excl`]. Offsets exported as
+    /// [`EXCL_VALID_OFFSET`](crate::EXCL_VALID_OFFSET) etc.
+    pub excl_valid: u8,
+    pub excl_addr: u64,
+    pub excl_val: u64,
     /// System registers, keyed by the encoded (op0,op1,CRn,CRm,op2) tuple.
     /// Read/written by MRS/MSR. The foundation of the system-mode model.
     pub sysregs: BTreeMap<u32, u64>,
@@ -151,6 +157,12 @@ pub const TLB_OFFSET: usize = std::mem::offset_of!(CpuState, tlb);
 /// EL-dependent permission check.
 pub const EL_OFFSET: usize = std::mem::offset_of!(CpuState, el);
 
+/// Byte offsets of the exclusive-monitor fields, for the JIT's inline LDXR/STXR
+/// (LL/SC) lowering to arm/check/clear the same monitor the interpreter uses.
+pub const EXCL_VALID_OFFSET: usize = std::mem::offset_of!(CpuState, excl_valid);
+pub const EXCL_ADDR_OFFSET: usize = std::mem::offset_of!(CpuState, excl_addr);
+pub const EXCL_VAL_OFFSET: usize = std::mem::offset_of!(CpuState, excl_val);
+
 impl Default for CpuState {
     fn default() -> Self {
         Self {
@@ -168,7 +180,9 @@ impl Default for CpuState {
             ttbr1_el1: 0,
             fpcr: 0,
             fpsr: 0,
-            excl: None,
+            excl_valid: 0,
+            excl_addr: 0,
+            excl_val: 0,
             sysregs: BTreeMap::new(),
             el: 1,
             spsel: true,
@@ -196,6 +210,24 @@ impl CpuState {
     pub fn flush_tlb(&mut self) {
         self.tlb.flush();
         self.tlb_flushed = true;
+    }
+
+    /// Arm the exclusive monitor with `(addr, val)` (LDXR/LDXP).
+    pub fn arm_excl(&mut self, addr: u64, val: u64) {
+        self.excl_valid = 1;
+        self.excl_addr = addr;
+        self.excl_val = val;
+    }
+
+    /// Clear the exclusive monitor (STXR success/failure, CLREX, exceptions).
+    pub fn clear_excl(&mut self) {
+        self.excl_valid = 0;
+    }
+
+    /// The armed exclusive monitor as `(addr, val)`, or `None` if not armed.
+    #[must_use]
+    pub fn excl(&self) -> Option<(u64, u64)> {
+        (self.excl_valid != 0).then_some((self.excl_addr, self.excl_val))
     }
 
     /// Read a general-purpose register. When `idx == 31`, `sp` chooses between

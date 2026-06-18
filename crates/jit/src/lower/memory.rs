@@ -40,7 +40,7 @@ use super::common::*;
 /// in a region — `jit_count = local + insns_before` (prior in-region blocks plus
 /// this block's progress) — or `None` for a single block (`jit_count =
 /// insns_before`).
-fn emit_bail(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_base: Option<u32>) {
+pub(super) fn emit_bail(f: &mut Function, pc: u64, entry_pc: u64, insns_before: u64, count_base: Option<u32>) {
     emit!(f, I::LocalGet(REGS_BASE));
     match count_base {
         Some(cl) => emit!(f, I::LocalGet(cl), I::I64Const(insns_before as i64), I::I64Add),

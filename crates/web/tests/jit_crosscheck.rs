@@ -131,6 +131,14 @@ fn atomic_rmw(size: u32, op: u32, rs: u32, rn: u32, rt: u32) -> u32 {
 fn cas(size: u32, rs: u32, rn: u32, rt: u32) -> u32 {
     (size << 30) | (0b001000 << 24) | (1 << 23) | (1 << 21) | (rs << 16) | (0b11111 << 10) | (rn << 5) | rt
 }
+/// LDXR: load-exclusive, arming the monitor (Rs/Rt2 = 11111).
+fn ldxr(size: u32, rt: u32, rn: u32) -> u32 {
+    (size << 30) | (0b001000 << 24) | (1 << 22) | (0b11111 << 16) | (0b11111 << 10) | (rn << 5) | rt
+}
+/// STXR: store-exclusive; Ws (Rs) = 0 on success, 1 on failure.
+fn stxr(size: u32, rs: u32, rt: u32, rn: u32) -> u32 {
+    (size << 30) | (0b001000 << 24) | (rs << 16) | (0b11111 << 10) | (rn << 5) | rt
+}
 /// SIMD three-same (Q, U, size, opcode); covers ADD/SUB/MUL/AND/ORR/EOR lanes.
 fn three_same(q: u32, u: u32, size: u32, opcode: u32, rd: u32, rn: u32, rm: u32) -> u32 {
     (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22) | (1 << 21) | (rm << 16)
@@ -366,6 +374,48 @@ fn atomic_sweep() {
         }
         crosscheck_with(&code, &xs, &[], 12, &format!("atomic i={i} w={w:#010x}"), enable_identity_mmu);
     }
+}
+
+/// LL/SC success path: the canonical LDXR/modify/STXR/retry loop. Single-
+/// threaded, so the STXR always succeeds (Ws = 0, no retry); checks the store
+/// landed and the status register is right.
+#[wasm_bindgen_test]
+fn exclusive_increment() {
+    let data = RAM_BASE + 0x4000;
+    let code = [
+        ldxr(3, 1, 2),    // x1 = [x2]   (arm)
+        add_imm(1, 1, 1), // x1++
+        stxr(3, 3, 1, 2), // [x2] = x1; w3 = status
+        subs_imm(0, 0, 1),
+        cbnz(0, -16),
+    ];
+    crosscheck_with(&code, &[(0, 400), (1, 0), (2, data), (3, 9)], &[], 20, "excl_inc", enable_identity_mmu);
+}
+
+/// LL/SC not-armed failure: STXR with no live monitor (the previous iteration's
+/// STXR cleared it) must fail every time — Ws = 1, memory untouched.
+#[wasm_bindgen_test]
+fn exclusive_not_armed() {
+    let data = RAM_BASE + 0x4000;
+    let code = [stxr(3, 3, 4, 2), subs_imm(0, 0, 1), cbnz(0, -8)];
+    crosscheck_with(&code, &[(0, 400), (2, data), (3, 0), (4, 0x1234)], &[], 12, "excl_unarmed", enable_identity_mmu);
+}
+
+/// LL/SC value-changed failure: an intervening normal store between LDXR and
+/// STXR changes memory, so the STXR fails (Ws = 1, no store) every iteration —
+/// exercising the monitor's value re-check in the compiled block.
+#[wasm_bindgen_test]
+fn exclusive_value_changed() {
+    let data = RAM_BASE + 0x4000;
+    let code = [
+        ldxr(3, 1, 2),    // x1 = [x2] = v (arm)
+        add_imm(5, 1, 1), // x5 = v + 1
+        str64(5, 2),      // [x2] = v + 1  (memory changed)
+        stxr(3, 6, 1, 2), // armed + addr match, but value changed -> fail
+        subs_imm(0, 0, 1),
+        cbnz(0, -20),
+    ];
+    crosscheck_with(&code, &[(0, 400), (1, 0), (2, data), (5, 0), (6, 0)], &[], 24, "excl_changed", enable_identity_mmu);
 }
 
 // ---- Randomized-operand sweep over the lowered families. ----

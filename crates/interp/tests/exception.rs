@@ -82,7 +82,7 @@ fn unaligned_exclusive_takes_alignment_abort() {
     assert_eq!(esr & 0x3f, 0x21, "DFSC = Alignment fault");
     assert_eq!((esr >> 6) & 1, 0, "WnR = 0 for a load");
     assert_eq!(cpu.x[1], 0, "destination register untouched on fault");
-    assert!(cpu.excl.is_none(), "monitor not armed on a faulting LDXR");
+    assert!(cpu.excl().is_none(), "monitor not armed on a faulting LDXR");
 }
 
 #[test]

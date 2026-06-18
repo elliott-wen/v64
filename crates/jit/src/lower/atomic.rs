@@ -1,24 +1,29 @@
-//! Inline LSE atomics — read-modify-write ([`AtomicRmw`]) and compare-and-swap
-//! ([`CompareSwap`]) — over the same TLB-checked fast path as [`super::memory`].
+//! Inline atomics over the same TLB-checked fast path as [`super::memory`]: LSE
+//! read-modify-write ([`AtomicRmw`]) and compare-and-swap ([`CompareSwap`]), plus
+//! the LL/SC exclusives ([`LoadExclusive`]/[`StoreExclusive`]).
 //!
 //! The emulator is single-threaded, so "atomic" is just load-compute-store and
-//! the acquire/release ordering bits are no-ops. Each op computes the base
-//! address `[Rn]` (SP for r31), opens the fast path (with store permission, since
-//! it writes), does the RMW/CAS directly in host memory, and bails the whole
-//! instruction on any miss — exactly like a load/store, with no partial state
-//! (the bail happens before any store). The exclusive-monitor forms (LDXR/STXR)
-//! are *not* here: their monitor state stays with the interpreter.
+//! the acquire/release bits are no-ops. Each op computes the base address `[Rn]`
+//! (SP for r31), checks natural alignment (atomics/exclusives fault if unaligned,
+//! so a misaligned address bails to let the interpreter raise the abort), opens
+//! the fast path, and works directly in host memory — bailing the whole
+//! instruction on any miss, with no partial state (the bail precedes any store or
+//! monitor change). LDXR/STXR arm and check the exclusive monitor in `CpuState`
+//! (the same fields the interpreter uses, so they stay in lockstep); any event
+//! that clears the monitor — exception, context switch — runs through the
+//! interpreter, which the JIT bails to.
 
 use aarch64_cpu_state::regs::offsets;
+use aarch64_cpu_state::{EXCL_ADDR_OFFSET, EXCL_VALID_OFFSET, EXCL_VAL_OFFSET};
 use aarch64_decoder::Insn;
 use wasm_encoder::{BlockType, Function, Instruction as I};
 
 use super::common::*;
-use super::memory::{close_fast_path, load_op, open_fast_path, store_op};
+use super::memory::{close_fast_path, emit_bail, load_op, open_fast_path, store_op};
 
-/// Inline an LSE [`AtomicRmw`] or [`CompareSwap`] with the TLB fast path. Returns
-/// `false` (no emission) for forms it doesn't handle; the caller gates with
-/// [`crate::is_inline_atomic`], so that path is unreachable in practice.
+/// Inline an atomic (LSE RMW/CAS or LL/SC exclusive) with the TLB fast path.
+/// Returns `false` (no emission) for forms it doesn't handle; the caller gates
+/// with [`crate::is_inline_atomic`], so that path is unreachable in practice.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_atomic(
     f: &mut Function,
@@ -37,6 +42,7 @@ pub(crate) fn lower_atomic(
             }
             let bytes = 1u64 << size;
             push_base(f, rn);
+            align_guard(f, bytes, pc, entry_pc, insns_before, count_base);
             open_fast_path(f, bytes, true, ram_phys, ram_size); // host addr -> ADDR
             // old = zero-extended load(ADDR) -> T1; s = X[Rs] & width-mask -> T2.
             emit!(f, I::LocalGet(ADDR), load_op(size, false), I::LocalSet(T1));
@@ -57,6 +63,7 @@ pub(crate) fn lower_atomic(
             }
             let bytes = 1u64 << size;
             push_base(f, rn);
+            align_guard(f, bytes, pc, entry_pc, insns_before, count_base);
             open_fast_path(f, bytes, true, ram_phys, ram_size);
             // old -> T1; compare = X[Rs] & mask -> T2.
             emit!(f, I::LocalGet(ADDR), load_op(size, false), I::LocalSet(T1));
@@ -77,9 +84,68 @@ pub(crate) fn lower_atomic(
             }
             close_fast_path(f, pc, entry_pc, insns_before, count_base);
         }
+        Insn::LoadExclusive { size, rt, rn } => {
+            if size > 3 {
+                return false;
+            }
+            let bytes = 1u64 << size;
+            push_base(f, rn);
+            align_guard(f, bytes, pc, entry_pc, insns_before, count_base);
+            open_fast_path(f, bytes, false, ram_phys, ram_size); // load: read perm
+            // val = zero-extended load(ADDR) -> T1.
+            emit!(f, I::LocalGet(ADDR), load_op(size, false), I::LocalSet(T1));
+            // Arm the monitor: excl_valid=1, excl_addr=VA (T0), excl_val=val (T1).
+            emit!(f, I::LocalGet(REGS_BASE), I::I32Const(1), I::I32Store8(at(EXCL_VALID_OFFSET)));
+            emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T0), I::I64Store(at(EXCL_ADDR_OFFSET)));
+            emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T1), I::I64Store(at(EXCL_VAL_OFFSET)));
+            if rt != 31 {
+                emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T1), I::I64Store(at(offsets::x(rt as usize))));
+            }
+            close_fast_path(f, pc, entry_pc, insns_before, count_base);
+        }
+        Insn::StoreExclusive { size, rs, rt, rn } => {
+            if size > 3 {
+                return false;
+            }
+            let bytes = 1u64 << size;
+            push_base(f, rn);
+            align_guard(f, bytes, pc, entry_pc, insns_before, count_base);
+            open_fast_path(f, bytes, true, ram_phys, ram_size); // store: write perm
+            // success = excl_valid & (excl_addr == VA) & (mem[ADDR] == excl_val),
+            // held (zero-extended) in the i64 local T2.
+            emit!(f, I::LocalGet(REGS_BASE), I::I32Load8U(at(EXCL_VALID_OFFSET)));
+            emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(EXCL_ADDR_OFFSET)), I::LocalGet(T0), I::I64Eq, I::I32And);
+            emit!(f, I::LocalGet(ADDR), load_op(size, false), I::LocalGet(REGS_BASE), I::I64Load(at(EXCL_VAL_OFFSET)), I::I64Eq, I::I32And);
+            emit!(f, I::I64ExtendI32U, I::LocalSet(T2));
+            // if success { store Rt's low `size` bytes }.
+            emit!(f, I::LocalGet(T2), I::I32WrapI64, I::If(BlockType::Empty));
+            emit!(f, I::LocalGet(ADDR));
+            if rt == 31 {
+                emit!(f, I::I64Const(0));
+            } else {
+                emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(offsets::x(rt as usize))));
+            }
+            emit!(f, store_op(size), I::End);
+            // Clear the monitor unconditionally; Ws = !success (0 = success).
+            emit!(f, I::LocalGet(REGS_BASE), I::I32Const(0), I::I32Store8(at(EXCL_VALID_OFFSET)));
+            if rs != 31 {
+                emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T2), I::I64Eqz, I::I64ExtendI32U, I::I64Store(at(offsets::x(rs as usize))));
+            }
+            close_fast_path(f, pc, entry_pc, insns_before, count_base);
+        }
         _ => return false,
     }
     true
+}
+
+/// Bail (raising an Alignment Data Abort in the interpreter) if the address in
+/// [`T0`] isn't naturally aligned to `bytes` — atomics and exclusives require it.
+fn align_guard(f: &mut Function, bytes: u64, pc: u64, entry_pc: u64, insns_before: u64, count_base: Option<u32>) {
+    if bytes > 1 {
+        emit!(f, I::LocalGet(T0), I::I64Const((bytes - 1) as i64), I::I64And, I::I32WrapI64, I::If(BlockType::Empty));
+        emit_bail(f, pc, entry_pc, insns_before, count_base);
+        emit!(f, I::End);
+    }
 }
 
 /// Push the base address `[Rn]` (SP for r31) into [`T0`] for the fast path.

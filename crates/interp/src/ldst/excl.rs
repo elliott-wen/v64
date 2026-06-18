@@ -15,7 +15,7 @@ pub(crate) fn load<M: GuestMem>(cpu: &mut CpuState, mem: &mut M, size: u8, rt: u
     if cpu.pending_abort.is_some() {
         return None; // faulted: don't arm the monitor or write the destination
     }
-    cpu.excl = Some((addr, val));
+    cpu.arm_excl(addr, val);
     if size == 3 {
         cpu.write_gpr(rt, false, val);
     } else {
@@ -39,13 +39,13 @@ pub(crate) fn store<M: GuestMem>(
     if align_check(cpu, addr, 1 << size, true) {
         return None; // unaligned exclusive: Alignment Data Abort
     }
-    let armed = cpu.excl; // copy out so the monitor check doesn't borrow `cpu`
+    let armed = cpu.excl(); // copy out so the monitor check doesn't borrow `cpu`
     let success = matches!(armed, Some((a, v)) if a == addr && read(cpu, mem, addr, size) == v);
     if success {
         let store_val = cpu.read_gpr(rt, false);
         write(cpu, mem, addr, size, store_val);
     }
-    cpu.excl = None;
+    cpu.clear_excl();
     cpu.write_gpr_w(rs, false, u64::from(!success)); // 0 = success
     None
 }
@@ -71,7 +71,7 @@ pub(crate) fn load_pair<M: GuestMem>(
     if cpu.pending_abort.is_some() {
         return None;
     }
-    cpu.excl = Some((addr, v1));
+    cpu.arm_excl(addr, v1);
     if size == 3 {
         cpu.write_gpr(rt, false, v1);
         cpu.write_gpr(rt2, false, v2);
@@ -98,7 +98,7 @@ pub(crate) fn store_pair<M: GuestMem>(
     if align_check(cpu, addr, 2 * esize, true) {
         return None; // unaligned exclusive pair: aligned to the whole pair size
     }
-    let armed = cpu.excl;
+    let armed = cpu.excl();
     let success = matches!(armed, Some((a, v)) if a == addr && read(cpu, mem, addr, size) == v);
     if success {
         let v1 = cpu.read_gpr(rt, false);
@@ -106,7 +106,7 @@ pub(crate) fn store_pair<M: GuestMem>(
         write(cpu, mem, addr, size, v1);
         write(cpu, mem, addr + esize, size, v2);
     }
-    cpu.excl = None;
+    cpu.clear_excl();
     cpu.write_gpr_w(rs, false, u64::from(!success));
     None
 }
