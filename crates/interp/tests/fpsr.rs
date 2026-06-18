@@ -2,7 +2,7 @@
 //! directly (these flags are well-defined, so no Unicorn oracle is needed).
 
 use aarch64_cpu_state::CpuState;
-use aarch64_interp::{step, GuestMem, Memory};
+use aarch64_interp::{step, Memory};
 
 // FPSR exception bits.
 const IOC: u64 = 1 << 0;
