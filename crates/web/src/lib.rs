@@ -8,7 +8,7 @@
 
 use aarch64_cpu_state::CpuState;
 use aarch64_interp::{run, Memory, StopReason};
-use aarch64_platform::{Board, BlockRunner, Clock, InputKind, DEFAULT_FREQ_HZ};
+use aarch64_platform::{Board, BlockRunner, Clock, InputKind, DEFAULT_FREQ_HZ, RAM_BASE};
 use wasm_bindgen::prelude::*;
 
 /// Guest base address the code blob is loaded at (for [`run_code`]).
@@ -98,6 +98,51 @@ impl BlockRunner for WasmRunner {
     }
     fn invalidate(&mut self) {
         jit_invalidate();
+    }
+}
+
+/// A microbenchmark harness: a bare machine (no Linux) running a raw code blob
+/// at the RAM base, MMU off (identity-mapped, EL1). Isolates a workload pattern
+/// — e.g. a tight loop — to measure the JIT's per-pattern speedup, away from the
+/// boot's cold-code-heavy mix. (MMU off means no TLB, so inline memory bails;
+/// use register/branch kernels to measure compute throughput.)
+#[wasm_bindgen]
+pub struct Kernel {
+    board: Board,
+}
+
+#[wasm_bindgen]
+impl Kernel {
+    /// Load `code` at the RAM base and point the PC at it.
+    #[wasm_bindgen(constructor)]
+    pub fn new(code: &[u8]) -> Kernel {
+        // A few MiB is ample for a tiny in-place loop (and avoids the 1 GiB
+        // default — these are created per kernel).
+        let clock = Box::new(WasmClock { freq: DEFAULT_FREQ_HZ });
+        let mut board = Board::with_ram_and_clock(4 << 20, clock);
+        board.machine.bus.ram_mut().write(RAM_BASE, code);
+        board.machine.cpu.pc = RAM_BASE;
+        Kernel { board }
+    }
+
+    /// Run `budget` instructions through the interpreter; return the count run.
+    pub fn run(&mut self, budget: usize) -> u64 {
+        self.board.machine.run(0, budget);
+        self.board.machine.total_insns()
+    }
+
+    /// Run `budget` instructions JIT-organized; return the count run.
+    pub fn run_jit(&mut self, budget: usize) -> u64 {
+        jit_set_memory(wasm_bindgen::memory());
+        jit_set_table(wasm_bindgen::function_table());
+        let mut runner = WasmRunner;
+        self.board.machine.run_jit_browser(0, budget, &mut runner);
+        self.board.machine.total_insns()
+    }
+
+    /// Read X[i] — a sanity check that the kernel actually executed.
+    pub fn x(&self, i: usize) -> u64 {
+        self.board.machine.cpu.x[i]
     }
 }
 
