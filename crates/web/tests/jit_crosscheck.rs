@@ -23,6 +23,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
+use aarch64_decoder::{decode, Insn};
 use aarch64_platform::{BlockRunner, Board, Clock, Machine, RAM_BASE};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
@@ -362,49 +363,147 @@ fn vreg(rng: &mut Rng) -> u32 {
 }
 
 /// A random valid integer data-processing instruction over safe registers
-/// (x1..x15), spanning arith/logical/carry, mul/div, variable shifts, bitfield,
-/// EXTR, and 1-source ops.
+/// (x1..x15), at 32- or 64-bit width, spanning arith/logical/carry, mul/div,
+/// variable shifts, bitfield, EXTR, and 1-source ops. (Any rare invalid
+/// width/opcode combo is dropped by the decoder filter in the sweep.)
 fn rand_dp(rng: &mut Rng) -> u32 {
     let (rd, rn, rm) = (greg(rng), greg(rng), greg(rng));
+    let w = rng.below(2) == 0; // exercise the 32-bit width too
+    // Pick the X or W base for a two-register op.
+    let two = |xb: u32, wb: u32| (if w { wb } else { xb }) | (rm << 16) | (rn << 5) | rd;
     match rng.below(21) {
-        0 => 0x8B00_0000 | (rm << 16) | (rn << 5) | rd,  // ADD
-        1 => 0xCB00_0000 | (rm << 16) | (rn << 5) | rd,  // SUB
-        2 => 0x8A00_0000 | (rm << 16) | (rn << 5) | rd,  // AND
-        3 => 0xAA00_0000 | (rm << 16) | (rn << 5) | rd,  // ORR
-        4 => 0xCA00_0000 | (rm << 16) | (rn << 5) | rd,  // EOR
-        5 => 0xAB00_0000 | (rm << 16) | (rn << 5) | rd,  // ADDS
-        6 => 0xEB00_0000 | (rm << 16) | (rn << 5) | rd,  // SUBS
-        7 => 0x9A00_0000 | (rm << 16) | (rn << 5) | rd,  // ADC
-        8 => 0xDA00_0000 | (rm << 16) | (rn << 5) | rd,  // SBC
-        9 => 0x9B00_0000 | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MADD
-        10 => 0x9B00_8000 | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MSUB
-        11 => 0x9AC0_0800 | (rm << 16) | (rn << 5) | rd, // UDIV (÷0 -> 0, defined)
-        12 => 0x9AC0_0C00 | (rm << 16) | (rn << 5) | rd, // SDIV
-        13 => 0x9AC0_2000 | (rm << 16) | (rn << 5) | rd, // LSLV
-        14 => 0x9AC0_2400 | (rm << 16) | (rn << 5) | rd, // LSRV
-        15 => 0x9AC0_2800 | (rm << 16) | (rn << 5) | rd, // ASRV
-        16 => 0x9AC0_2C00 | (rm << 16) | (rn << 5) | rd, // RORV
-        17 => 0x9A80_0000 | (rm << 16) | (rng.below(16) << 12) | (rn << 5) | rd, // CSEL
+        0 => two(0x8B00_0000, 0x0B00_0000),  // ADD
+        1 => two(0xCB00_0000, 0x4B00_0000),  // SUB
+        2 => two(0x8A00_0000, 0x0A00_0000),  // AND
+        3 => two(0xAA00_0000, 0x2A00_0000),  // ORR
+        4 => two(0xCA00_0000, 0x4A00_0000),  // EOR
+        5 => two(0xAB00_0000, 0x2B00_0000),  // ADDS
+        6 => two(0xEB00_0000, 0x6B00_0000),  // SUBS
+        7 => two(0x9A00_0000, 0x1A00_0000),  // ADC
+        8 => two(0xDA00_0000, 0x5A00_0000),  // SBC
+        9 => (if w { 0x1B00_0000 } else { 0x9B00_0000 }) | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MADD
+        10 => (if w { 0x1B00_8000 } else { 0x9B00_8000 }) | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MSUB
+        11 => two(0x9AC0_0800, 0x1AC0_0800), // UDIV (÷0 -> 0, defined)
+        12 => two(0x9AC0_0C00, 0x1AC0_0C00), // SDIV
+        13 => two(0x9AC0_2000, 0x1AC0_2000), // LSLV
+        14 => two(0x9AC0_2400, 0x1AC0_2400), // LSRV
+        15 => two(0x9AC0_2800, 0x1AC0_2800), // ASRV
+        16 => two(0x9AC0_2C00, 0x1AC0_2C00), // RORV
+        17 => (if w { 0x1A80_0000 } else { 0x9A80_0000 }) | (rm << 16) | (rng.below(16) << 12) | (rn << 5) | rd, // CSEL
         18 => {
-            // Bitfield: UBFM / SBFM / BFM (64-bit, N=1), random immr/imms.
-            let base = [0xD340_0000u32, 0x9340_0000, 0xB340_0000][rng.below(3) as usize];
-            base | (rng.below(64) << 16) | (rng.below(64) << 10) | (rn << 5) | rd
+            // Bitfield: UBFM / SBFM / BFM. 64-bit sets N=1 (the 0x_x340 bases);
+            // 32-bit clears it, and immr/imms are 0..31.
+            let bits = if w { 32 } else { 64 };
+            let (immr, imms) = (rng.below(bits), rng.below(bits));
+            let base = if w {
+                [0x5300_0000u32, 0x1300_0000, 0x3300_0000]
+            } else {
+                [0xD340_0000u32, 0x9340_0000, 0xB340_0000]
+            }[rng.below(3) as usize];
+            base | (immr << 16) | (imms << 10) | (rn << 5) | rd
         }
-        19 => 0x93C0_0000 | (rm << 16) | (rng.below(64) << 10) | (rn << 5) | rd, // EXTR
+        19 => {
+            // EXTR (64-bit N=1 / 32-bit N=0), `imms` = lsb in 0..width.
+            let bits = if w { 32 } else { 64 };
+            (if w { 0x1380_0000 } else { 0x93C0_0000 }) | (rm << 16) | (rng.below(bits) << 10) | (rn << 5) | rd
+        }
         _ => {
-            // Data-proc 1-source: RBIT/REV16/REV32/REV/CLZ/CLS.
+            // Data-proc 1-source: RBIT/REV16/REV(32)/REV64/CLZ/CLS. REV64 (op 3)
+            // is X-only; the decoder filter drops it at W width.
             let op = [0u32, 1, 2, 3, 4, 5][rng.below(6) as usize];
-            0xDAC0_0000 | (op << 10) | (rn << 5) | rd
+            (if w { 0x5AC0_0000 } else { 0xDAC0_0000 }) | (op << 10) | (rn << 5) | rd
         }
     }
 }
 
-/// A random valid SIMD instruction over safe vector registers (v0..v15):
-/// three-same, two-register-misc, and shift-by-immediate (byte lanes).
+/// `copy_word` / `imm5_for`: the DUP/INS/UMOV/SMOV "advanced SIMD copy" layout
+/// (matches the difftest encoders, which are validated against Unicorn).
+fn copy_word(q: u32, op: u32, imm5: u32, imm4: u32, rn: u32, rd: u32) -> u32 {
+    (q << 30) | (op << 29) | (0b01110000 << 21) | (imm5 << 16) | (imm4 << 11) | (1 << 10) | (rn << 5) | rd
+}
+fn imm5_for(size: u32, index: u32) -> u32 {
+    (index << (size + 1)) | (1 << size)
+}
+
+/// A random valid SIMD instruction over safe registers: three-same,
+/// two-register-misc, shift-by-immediate, widening multiply (three-diff),
+/// modified-immediate, copy (DUP/INS/UMOV/SMOV), and permute (ZIP/TRN/UZP/EXT).
+/// V operands are v0..v15; the UMOV/SMOV destination GPR is x1..x15 so it can't
+/// touch the x0 loop counter.
 fn rand_simd(rng: &mut Rng) -> u32 {
     let (rd, rn, rm) = (vreg(rng), vreg(rng), vreg(rng));
     let q = rng.below(2);
-    match rng.below(3) {
+    match rng.below(8) {
+        3 => {
+            // three-diff widening multiply SMULL/UMULL (Q selects source half).
+            let u = rng.below(2);
+            let size = rng.below(3);
+            (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22) | (1 << 21)
+                | (rm << 16) | (0b1100 << 12) | (rn << 5) | rd
+        }
+        4 => {
+            // modified-immediate: MOVI/MVNI/ORR/BIC-imm (cmode + op select).
+            let mut q = q;
+            let op = rng.below(2);
+            let cmode = rng.below(16);
+            if cmode == 0b1111 && op == 1 {
+                q = 1; // FMOV-vector form needs Q=1
+            }
+            let imm8 = rng.below(256);
+            (q << 30) | (op << 29) | (0b01111 << 24) | ((imm8 >> 5) << 16)
+                | (cmode << 12) | (0b01 << 10) | ((imm8 & 0x1f) << 5) | rd
+        }
+        5 => {
+            // DUP (element): broadcast one lane of Vn.
+            let size = if q == 1 { rng.below(4) } else { rng.below(3) };
+            let index = rng.below(16 >> size);
+            copy_word(q, 0, imm5_for(size, index), 0b0000, rn, rd)
+        }
+        6 => {
+            // INS general (GPR -> lane) or INS element (lane -> lane), Q=1.
+            let size = rng.below(4);
+            let dst = rng.below(16 >> size);
+            let imm5 = imm5_for(size, dst);
+            if rng.below(2) == 0 {
+                copy_word(1, 0, imm5, 0b0011, greg(rng), rd) // INS (general): reads a GPR
+            } else {
+                let src = rng.below(16 >> size);
+                copy_word(1, 1, imm5, (src << size) & 0xf, rn, rd) // INS (element)
+            }
+        }
+        7 => {
+            // UMOV/SMOV: lane -> GPR. Destination is a safe GPR (x1..x15).
+            let signed = rng.below(2) == 0;
+            let q2 = rng.below(2);
+            let size = match (signed, q2 == 1) {
+                (true, true) => rng.below(3),  // SMOV Xd: B/H/S
+                (true, false) => rng.below(2), // SMOV Wd: B/H
+                (false, true) => 3,            // UMOV Xd: D
+                (false, false) => rng.below(3),// UMOV Wd: B/H/S
+            };
+            let index = rng.below(16 >> size);
+            let imm4 = if signed { 0b0101 } else { 0b0111 };
+            copy_word(q2, 0, imm5_for(size, index), imm4, vreg(rng), greg(rng))
+        }
+        _ => rand_simd_three_same_misc_shift(rng, rd, rn, rm, q),
+    }
+}
+
+/// The first three SIMD families (kept separate so `rand_simd` stays readable).
+fn rand_simd_three_same_misc_shift(rng: &mut Rng, rd: u32, rn: u32, rm: u32, q: u32) -> u32 {
+    match rng.below(4) {
+        3 => {
+            // permute: ZIP1/2, UZP1/2, TRN1/2, and EXT.
+            if rng.below(2) == 0 {
+                let opcode = [0b001u32, 0b010, 0b011, 0b101, 0b110, 0b111][rng.below(6) as usize];
+                let size = if q == 1 { rng.below(4) } else { rng.below(3) };
+                (q << 30) | (0b01110 << 24) | (size << 22) | (rm << 16)
+                    | (opcode << 12) | (1 << 11) | (rn << 5) | rd
+            } else {
+                let imm4 = if q == 1 { rng.below(16) } else { rng.below(8) };
+                (q << 30) | (1 << 29) | (0b01110 << 24) | (rm << 16) | (imm4 << 11) | (rn << 5) | rd
+            }
+        }
         0 => {
             // three-same: ADD/SUB (any size, 2D needs Q=1), MUL, AND/ORR/EOR.
             let mut q = q;
@@ -479,12 +578,76 @@ fn rand_simd(rng: &mut Rng) -> u32 {
     }
 }
 
+/// A random scalar FP instruction (S/D): dp2/dp1/dp3, compare, csel, and
+/// int<->fp conversions. FP isn't lowered yet (it bails to the interpreter, so
+/// these pass today); once a lowering lands this exercises it for real. GPR
+/// destinations/sources use x1..x15 so the x0 counter is never disturbed.
+fn rand_fp(rng: &mut Rng) -> u32 {
+    let ftype = rng.below(2); // 0 = single, 1 = double
+    let (rd, rn, rm) = (vreg(rng), vreg(rng), vreg(rng));
+    const HDR: u32 = 0b0001_1110 << 24;
+    match rng.below(7) {
+        0 => {
+            // dp2: FMUL/FDIV/FADD/FSUB/FMAX/FMIN/FMAXNM/FMINNM/FNMUL
+            let opcode = rng.below(9);
+            HDR | (ftype << 22) | (1 << 21) | (rm << 16) | (opcode << 12) | (0b10 << 10) | (rn << 5) | rd
+        }
+        1 => {
+            // dp1: FMOV/FABS/FNEG/FSQRT/FRINT{N,P,M,Z,A,X,I}
+            let opcode = [0u32, 1, 2, 3, 0x8, 0x9, 0xa, 0xb, 0xc, 0xe, 0xf][rng.below(11) as usize];
+            HDR | (ftype << 22) | (1 << 21) | (opcode << 15) | (0b10000 << 10) | (rn << 5) | rd
+        }
+        2 => {
+            // dp3: FMADD/FMSUB/FNMADD/FNMSUB
+            let (o1, o0) = (rng.below(2), rng.below(2));
+            (0b0011111 << 24) | (ftype << 22) | (o1 << 21) | (rm << 16) | (o0 << 15) | (vreg(rng) << 10) | (rn << 5) | rd
+        }
+        3 => {
+            // FCMP / FCMPE (reg or #0.0). Sets NZCV; the loop's SUBS overwrites
+            // flags before the CBNZ, so it doesn't disturb control flow.
+            let (cmp_zero, sig) = (rng.below(2), rng.below(2));
+            let opcode2 = (sig << 4) | (cmp_zero << 3);
+            let rmf = if cmp_zero == 1 { 0 } else { rm };
+            HDR | (ftype << 22) | (1 << 21) | (rmf << 16) | (0b1000 << 10) | (rn << 5) | opcode2
+        }
+        4 => {
+            // FCSEL
+            let cond = rng.below(16);
+            HDR | (ftype << 22) | (1 << 21) | (rm << 16) | (cond << 12) | (0b11 << 10) | (rn << 5) | rd
+        }
+        5 => {
+            // SCVTF / UCVTF (GPR -> FP): reads a GPR (x1..x15).
+            let opcode = if rng.below(2) == 0 { 0b010 } else { 0b011 };
+            let sf = rng.below(2);
+            (sf << 31) | (0b0011110 << 24) | (ftype << 22) | (1 << 21) | (opcode << 16) | (greg(rng) << 5) | rd
+        }
+        _ => {
+            // FCVTZS / FCVTZU (FP -> GPR, round to zero): writes a GPR (x1..x15).
+            let opcode = if rng.below(2) == 0 { 0b000 } else { 0b001 };
+            let sf = rng.below(2);
+            (sf << 31) | (0b0011110 << 24) | (ftype << 22) | (1 << 21) | (0b11 << 19) | (opcode << 16) | (rn << 5) | greg(rng)
+        }
+    }
+}
+
 #[wasm_bindgen_test]
 fn random_lowering_sweep() {
+    const TARGET: u32 = 1200;
     let mut rng = Rng::new(0xC0FFEE_1234);
-    for i in 0..600u32 {
-        let simd = i & 1 == 0;
-        let w = if simd { rand_simd(&mut rng) } else { rand_dp(&mut rng) };
+    let (mut tested, mut tries) = (0u32, 0u32);
+    while tested < TARGET && tries < TARGET * 20 {
+        tries += 1;
+        // 0/1 = integer DP, 2/3 = SIMD, 4 = scalar FP.
+        let kind = rng.below(5);
+        let (w, fp) = match kind {
+            0 | 1 => (rand_dp(&mut rng), false),
+            2 | 3 => (rand_simd(&mut rng), false),
+            _ => (rand_fp(&mut rng), true),
+        };
+        // Never stall the loop on a word our own decoder rejects.
+        if matches!(decode(w), Insn::Unsupported { .. }) {
+            continue;
+        }
         // [W ; subs x0,#1 ; cbnz x0] — W over x1..x15 / v0..v15 can't touch x0.
         let code = [w, subs_imm(0, 0, 1), cbnz(0, -8)];
 
@@ -493,11 +656,18 @@ fn random_lowering_sweep() {
             xs.push((r, rng.next()));
         }
         let mut vs = Vec::new();
-        if simd {
-            for r in 0..16usize {
-                vs.push((r, (u128::from(rng.next()) << 64) | u128::from(rng.next())));
-            }
+        for r in 0..16usize {
+            vs.push((r, (u128::from(rng.next()) << 64) | u128::from(rng.next())));
         }
-        crosscheck(&code, &xs, &vs, 12, &format!("sweep i={i} w={w:#010x}"));
+        let ctx = format!("sweep #{tested} kind={kind} w={w:#010x}");
+        // FP wants default-NaN mode (DN=1) so Rust-float and wasm-float results
+        // agree bit-for-bit once a lowering exists.
+        if fp {
+            crosscheck_with(&code, &xs, &vs, 12, &ctx, |b| b.machine.cpu.fpcr = 1 << 25);
+        } else {
+            crosscheck(&code, &xs, &vs, 12, &ctx);
+        }
+        tested += 1;
     }
+    assert!(tested >= TARGET, "sweep produced too few decodable instructions ({tested})");
 }

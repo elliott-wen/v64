@@ -24,3 +24,6 @@ wasm-bindgen = "=0.2.125"
 # JIT-vs-interpreter differential crosscheck runs in node (the JIT only executes
 # under a WebAssembly host). Version tracks `wasm-bindgen` above.
 wasm-bindgen-test = "0.3"
+# The crosscheck's random sweep filters out encodings our decoder rejects, so a
+# stray invalid word never stalls the loop on `Unsupported`.
+aarch64-decoder = { path = "../decoder" }
