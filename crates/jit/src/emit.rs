@@ -29,13 +29,30 @@ pub fn emit_block(block: &Block, ram_phys: u64, ram_size: u64) -> Vec<u8> {
     wrap_module(emit_body(block, ram_phys, ram_size))
 }
 
-/// Emit a self-contained WASM module for a multi-block [`Region`](crate::Region)
-/// — one function with an internal dispatch loop, so control stays in compiled
-/// code across in-region branches (see [`crate::lower::emit_region_body`]). Same
-/// ABI and single `env.memory` import as [`emit_block`].
+/// Emit a self-contained WASM module for a [`Region`](crate::Region). A single
+/// straight-line block (its terminator leaves the region) is emitted directly,
+/// with no loop overhead. Anything with intra-region control flow — a
+/// self-looping block, or any multi-block region — uses an internal dispatch
+/// loop ([`crate::lower::emit_region_body`]) so control stays in compiled code
+/// across branches. Same ABI and single `env.memory` import as [`emit_block`].
 #[must_use]
 pub fn emit_region(region: &crate::Region, ram_phys: u64, ram_size: u64) -> Vec<u8> {
-    wrap_module(crate::lower::emit_region_body(region, ram_phys, ram_size))
+    let body = if region.blocks.len() == 1 && !is_self_loop(&region.blocks[0]) {
+        emit_body(&region.blocks[0], ram_phys, ram_size)
+    } else {
+        crate::lower::emit_region_body(region, ram_phys, ram_size)
+    };
+    wrap_module(body)
+}
+
+/// True if `block`'s terminator branches back to its own entry (a loop). Such a
+/// block needs the dispatch loop to iterate in compiled code rather than
+/// returning to the organizer each iteration.
+fn is_self_loop(block: &Block) -> bool {
+    block
+        .insns
+        .last()
+        .is_some_and(|(pc, insn)| crate::lower::taken_target(insn, *pc) == Some(block.start))
 }
 
 /// Wrap a block/region function body in the module scaffolding: the
@@ -80,9 +97,10 @@ fn wrap_module(body: Function) -> Vec<u8> {
     module.finish()
 }
 
-/// Build the block function body: lower every instruction inline. The last is
-/// either an inline branch (which leaves the next PC) or a register op followed
-/// by the sequential next PC; either way the function returns the next guest PC.
+/// Build a single straight-line block's function body: lower every instruction
+/// inline, returning the next guest PC. The caller ([`emit_region`]) only uses
+/// this for a one-shot block whose terminator leaves the region; self-looping or
+/// multi-block regions go through the dispatch loop instead.
 fn emit_body(block: &Block, ram_phys: u64, ram_size: u64) -> Function {
     let mut f = Function::new([
         (crate::lower::SCRATCH_I64, ValType::I64),
@@ -96,18 +114,6 @@ fn emit_body(block: &Block, ram_phys: u64, ram_size: u64) -> Function {
     // correct at whatever VA it is mapped to (position independence).
     let entry_pc = block.start;
     crate::lower::prologue(&mut f);
-
-    // A memory-free block whose terminator branches back to its own entry is a
-    // self-loop: emit it as an internal wasm `loop` so iterations stay in
-    // compiled code. (Blocks containing a load/store can bail mid-way, which
-    // doesn't compose with the loop, so those go straight-line below.)
-    let (last_pc, last_insn) = &block.insns[n - 1];
-    let has_mem = block.insns.iter().any(|(_, i)| crate::is_inline_mem(i));
-    if !has_mem && crate::lower::taken_target(last_insn, *last_pc) == Some(entry_pc) {
-        crate::lower::emit_self_loop(&mut f, block, entry_pc);
-        f.instruction(&Instruction::End);
-        return f;
-    }
 
     // Straight-line block: it runs once per call, so it retired `n` instructions
     // (a mid-block memory bail overwrites this with the count it actually ran).

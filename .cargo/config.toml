@@ -1,0 +1,13 @@
+# wasm32 test/run configuration, primarily for the JIT↔interpreter crosscheck in
+# `crates/web` (the JIT only executes under a WebAssembly host, so its
+# differential test runs in node via `wasm-bindgen-test-runner`).
+#
+#   cargo test -p aarch64-web --target wasm32-unknown-unknown
+#
+# The JIT appends each compiled block to the module's indirect function table, so
+# the table must be growable and exported — the same link args `crates/web/build.sh`
+# uses for the production browser build. (A `RUSTFLAGS` env var, if set, overrides
+# these; build.sh sets the same flags itself.)
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"
+rustflags = ["-C", "link-arg=--growable-table", "-C", "link-arg=--export-table"]

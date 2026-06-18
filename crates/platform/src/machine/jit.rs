@@ -13,7 +13,7 @@
 //! loops pay compilation cost.
 
 use aarch64_interp::{step, translate, undefined, Access, GuestMem, Step, StopReason};
-use aarch64_jit::{emit_block, emit_region, form_region};
+use aarch64_jit::{emit_region, form_region};
 
 use super::Machine;
 
@@ -223,13 +223,9 @@ impl Machine {
                 self.jit_regions += 1;
                 self.jit_region_blocks += region.blocks.len() as u64;
                 let (_, ram_phys, ram_size) = self.bus.ram_jit_info();
-                // A single-block region needs no dispatch loop — emit it directly.
-                let wasm = if region.blocks.len() == 1 {
-                    emit_block(&region.blocks[0], ram_phys, ram_size)
-                } else {
-                    emit_region(&region, ram_phys, ram_size)
-                };
-                let handle = runner.compile(&wasm);
+                // emit_region picks the shape: a lean one-shot body for a single
+                // straight-line block, the dispatch loop for self-loops / multi-block.
+                let handle = runner.compile(&emit_region(&region, ram_phys, ram_size));
                 self.jit_cache.insert(pa, JitBlock::Hot { handle });
                 handle
             }

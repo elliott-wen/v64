@@ -35,21 +35,17 @@ pub(super) const RCOUNT: u32 = SCRATCH0 + 7;
 /// Number of scratch i64 locals the block function declares.
 pub(crate) const SCRATCH_I64: u32 = 8;
 /// Number of scratch i32 locals: the computed linear address [`ADDR`], the
-/// self-loop iteration counter [`PASSES`], the region safety counter [`RITERS`],
-/// and the region dispatch index [`RIDX`].
-pub(crate) const SCRATCH_I32: u32 = 4;
+/// region safety counter [`RITERS`], and the region dispatch index [`RIDX`].
+pub(crate) const SCRATCH_I32: u32 = 3;
 /// The i32 scratch local holding a computed linear memory address. First i32
 /// local, following the i64 scratch locals.
 pub(super) const ADDR: u32 = SCRATCH0 + SCRATCH_I64;
-/// The i32 local counting iterations of an internally-emitted self-loop (see
-/// `emit_self_loop`). Zero-initialised like all wasm locals.
-pub(super) const PASSES: u32 = SCRATCH0 + SCRATCH_I64 + 1;
 /// The i32 region dispatch-loop safety counter (caps iterations before yielding
 /// to the organizer to service timers/IRQs — like v86's `LOOP_COUNTER`).
-pub(super) const RITERS: u32 = SCRATCH0 + SCRATCH_I64 + 2;
+pub(super) const RITERS: u32 = SCRATCH0 + SCRATCH_I64 + 1;
 /// The i32 region dispatch index — which basic block to run next. A `br_table`
 /// jumps to it in O(1) (the entry block is index 0 = the zero-initialised value).
-pub(super) const RIDX: u32 = SCRATCH0 + SCRATCH_I64 + 3;
+pub(super) const RIDX: u32 = SCRATCH0 + SCRATCH_I64 + 2;
 
 // NZCV bit positions in the packed word.
 pub(super) const N_BIT: i64 = 31;
@@ -108,20 +104,6 @@ pub(super) fn store_local(f: &mut Function, rd: u8, sf: bool, sp: bool, tmp: u32
 /// straight-line blocks (each call executes the block exactly once).
 pub(super) fn store_count_const(f: &mut Function, count: u64) {
     emit!(f, I::LocalGet(0), I::I64Const(count as i64), I::I64Store(at(JIT_COUNT_OFFSET)));
-}
-
-/// Store `PASSES * len` into the block's `jit_count` slot — the instruction count
-/// for a self-loop that ran `PASSES` iterations of a `len`-instruction body.
-pub(super) fn store_count_loop(f: &mut Function, len: u64) {
-    emit!(
-        f,
-        I::LocalGet(0),
-        I::LocalGet(PASSES),
-        I::I64ExtendI32U,
-        I::I64Const(len as i64),
-        I::I64Mul,
-        I::I64Store(at(JIT_COUNT_OFFSET))
-    );
 }
 
 /// Load the runtime entry PC (image PC at block entry) into [`PC0`]. Emitted once

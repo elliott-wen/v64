@@ -46,12 +46,6 @@ pub(crate) use common::{SCRATCH_I32, SCRATCH_I64};
 pub(crate) use memory::{lower_mem, lower_mem_pair};
 pub(crate) use terminator::{lower_terminator, taken_target};
 
-/// Iteration cap on an internally-emitted self-loop before it returns to the
-/// organizer so timers/IRQs get serviced — our analogue of v86's `LOOP_COUNTER`.
-/// Only pure-ALU self-loops (no memory ops) are emitted as loops, so they can't
-/// be waiting on external state; this just bounds timer latency.
-const MAX_LOOP: u32 = 8192;
-
 /// Emit the block prologue: cache the runtime entry PC for position-independent
 /// PC math. Must be emitted before any lowering. See `common::PC0`.
 pub(crate) fn prologue(f: &mut Function) {
@@ -68,59 +62,6 @@ pub(crate) fn gen_pc(f: &mut Function, abs: u64, entry_pc: u64) {
 /// — for a straight-line block, its static length (one pass per call).
 pub(crate) fn store_count(f: &mut Function, count: u64) {
     common::store_count_const(f, count);
-}
-
-/// Emit a block whose terminator branches back to its own entry as an internal
-/// wasm `loop`, so the iterations run in compiled code instead of one organizer
-/// round-trip per iteration. Bounded by [`MAX_LOOP`] (then it returns the entry
-/// PC so the organizer re-enters after servicing async events). Reports the
-/// instruction count it actually ran via the `jit_count` slot.
-///
-/// Shape (`$exit` outer, `$top` the loop):
-/// ```text
-///   block $exit (result i64)
-///     loop $top
-///       <body>                       ;; the non-terminator instructions
-///       <taken?>                      ;; i32: 1 = branch back to entry
-///       PASSES += 1
-///       if (taken)
-///         if (PASSES < MAX_LOOP) { br $top }            ;; keep looping in-wasm
-///         else { jit_count = PASSES*len; -> $exit(entry) } ;; yield to organizer
-///       else { jit_count = PASSES*len; -> $exit(fallthrough) }  ;; loop done
-///     end
-///     unreachable                     ;; only reached via the brs above
-///   end
-/// ```
-pub(crate) fn emit_self_loop(f: &mut Function, block: &Block, entry_pc: u64) {
-    let n = block.insns.len();
-    let (last_pc, last_insn) = &block.insns[n - 1];
-    let fallthrough = last_pc.wrapping_add(4);
-
-    emit!(f, I::Block(BlockType::Result(ValType::I64))); // $exit
-    emit!(f, I::Loop(BlockType::Empty)); // $top
-    for (pc, insn) in &block.insns[..n - 1] {
-        let ok = lower_sequential(f, insn, *pc, entry_pc);
-        debug_assert!(ok, "self-loop body instruction must be inline-lowerable");
-    }
-    terminator::emit_taken_cond(f, last_insn); // i32: 1 = take the back-branch
-    emit!(f, I::LocalGet(common::PASSES), I::I32Const(1), I::I32Add, I::LocalSet(common::PASSES));
-    emit!(f, I::If(BlockType::Empty)); // taken?
-    emit!(f, I::LocalGet(common::PASSES), I::I32Const(MAX_LOOP as i32), I::I32LtU);
-    emit!(f, I::If(BlockType::Empty)); // under the iteration cap?
-    emit!(f, I::Br(2)); // continue: -> loop $top
-    emit!(f, I::Else);
-    common::store_count_loop(f, n as u64);
-    common::gen_rel_pc(f, entry_pc, entry_pc); // yield: re-enter at the loop top
-    emit!(f, I::Br(3)); // -> block $exit
-    emit!(f, I::End);
-    emit!(f, I::Else); // not taken: the loop is done
-    common::store_count_loop(f, n as u64);
-    common::gen_rel_pc(f, fallthrough, entry_pc);
-    emit!(f, I::Br(2)); // -> block $exit
-    emit!(f, I::End);
-    emit!(f, I::End); // end loop $top
-    emit!(f, I::Unreachable); // unreachable: every path above branches out
-    emit!(f, I::End); // end block $exit — leaves the next PC (i64) on the stack
 }
 
 /// Dispatch-loop iterations before a region yields to the organizer (so timers

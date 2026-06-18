@@ -1,0 +1,374 @@
+//! JIT ↔ interpreter differential crosscheck, run in node.
+//!
+//! The JIT only executes under a `WebAssembly` host, so this is the third leg of
+//! the trust chain: Unicorn validates the interpreter (the native fuzz sweep),
+//! and this validates the JIT *against that interpreter*. Each kernel is run two
+//! ways through the same `Machine` — once interpreted, once JIT-organized — and
+//! the full architectural state (and RAM) must come out identical.
+//!
+//! Blocks only compile once *hot* (`JIT_HOTNESS` = 256 executions), so every
+//! kernel is a **loop** that runs well past that threshold; the compiled path is
+//! then what we compare, asserted via `jit_insns() > 0`. The loop counter lives
+//! in `x0` and stopping is by target PC (`until`), so the interpreter and the
+//! JIT halt at the same architectural point regardless of how the JIT batches a
+//! block.
+//!
+//! This is a standalone integration test: it carries its own tiny JS JIT backend
+//! and `BlockRunner`, depending only on the public `aarch64-platform` API.
+//!
+//! Run with (runner + growable-table link args come from `.cargo/config.toml`):
+//! ```text
+//! cargo test -p aarch64-web --target wasm32-unknown-unknown
+//! ```
+
+#![cfg(target_arch = "wasm32")]
+
+use aarch64_platform::{BlockRunner, Board, Clock, Machine, RAM_BASE};
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_test::*;
+
+// --- The JS-side JIT backend (mirrors `crates/web/src/lib.rs`). `jit_compile`
+// instantiates a block module against this test module's shared memory and
+// appends its `block` export to the indirect function table; *running* is a
+// direct in-wasm `call_indirect` (see `TestRunner::run`). ---
+#[wasm_bindgen(inline_js = "
+let mem = null;
+let table = null;
+export function jit_set_memory(m) { mem = m; }
+export function jit_set_table(t) { table = t; }
+export function jit_compile(bytes) {
+    const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { env: { memory: mem } });
+    const idx = table.grow(1);
+    table.set(idx, inst.exports.block);
+    return idx;
+}
+export function jit_invalidate() {}
+")]
+extern "C" {
+    fn jit_set_memory(mem: JsValue);
+    fn jit_set_table(table: JsValue);
+    fn jit_compile(bytes: &[u8]) -> u32;
+    fn jit_invalidate();
+}
+
+/// [`BlockRunner`] over the node `WebAssembly` API; same shape as the production
+/// `WasmRunner` — compile through JS, run via in-wasm `call_indirect`.
+struct TestRunner;
+
+impl BlockRunner for TestRunner {
+    fn compile(&mut self, wasm: &[u8]) -> u32 {
+        jit_compile(wasm)
+    }
+    fn run(&mut self, handle: u32, regs_base: u32, ram_base: u32) -> u64 {
+        // A wasm fn pointer *is* the table index, so transmuting yields a
+        // callable pointer and the call lowers to `call_indirect`.
+        let block: extern "C" fn(u32, u32) -> u64 =
+            unsafe { core::mem::transmute(handle as usize) };
+        block(regs_base, ram_base)
+    }
+    fn invalidate(&mut self) {
+        jit_invalidate();
+    }
+}
+
+/// Constant clock — no IRQs/timers are armed in these kernels, so time is inert.
+struct ZeroClock;
+impl Clock for ZeroClock {
+    fn now(&self) -> u64 {
+        0
+    }
+}
+
+// --- Instruction encoders (OR-composed so the field math is self-evident). ---
+fn add_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+    0x8B00_0000 | (rm << 16) | (rn << 5) | rd
+}
+fn eor_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+    0xCA00_0000 | (rm << 16) | (rn << 5) | rd
+}
+fn orr_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+    0xAA00_0000 | (rm << 16) | (rn << 5) | rd
+}
+fn add_imm(rd: u32, rn: u32, imm12: u32) -> u32 {
+    0x9100_0000 | (imm12 << 10) | (rn << 5) | rd
+}
+fn subs_imm(rd: u32, rn: u32, imm12: u32) -> u32 {
+    0xF100_0000 | (imm12 << 10) | (rn << 5) | rd
+}
+fn madd(rd: u32, rn: u32, rm: u32, ra: u32) -> u32 {
+    0x9B00_0000 | (rm << 16) | (ra << 10) | (rn << 5) | rd
+}
+fn udiv(rd: u32, rn: u32, rm: u32) -> u32 {
+    0x9AC0_0800 | (rm << 16) | (rn << 5) | rd
+}
+fn csel(rd: u32, rn: u32, rm: u32, cond: u32) -> u32 {
+    0x9A80_0000 | (rm << 16) | (cond << 12) | (rn << 5) | rd
+}
+/// STR Xt, [Xn] / LDR Xt, [Xn] (unsigned offset 0).
+fn str64(rt: u32, rn: u32) -> u32 {
+    0xF900_0000 | (rn << 5) | rt
+}
+fn ldr64(rt: u32, rn: u32) -> u32 {
+    0xF940_0000 | (rn << 5) | rt
+}
+/// SIMD three-same (Q, U, size, opcode); covers ADD/SUB/MUL/AND/ORR/EOR lanes.
+fn three_same(q: u32, u: u32, size: u32, opcode: u32, rd: u32, rn: u32, rm: u32) -> u32 {
+    (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22) | (1 << 21) | (rm << 16)
+        | (opcode << 11) | (1 << 10) | (rn << 5) | rd
+}
+/// CBNZ Xt / B.cond, signed byte displacement from the instruction.
+fn cbnz(rt: u32, off: i32) -> u32 {
+    0xB500_0000 | ((((off >> 2) as u32) & 0x7_ffff) << 5) | rt
+}
+fn bcond(cond: u32, off: i32) -> u32 {
+    0x5400_0000 | ((((off >> 2) as u32) & 0x7_ffff) << 5) | cond
+}
+
+fn image(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// A bare machine: code at `RAM_BASE`, PC there, MMU off (EL1h), registers seeded.
+fn machine(words: &[u32], xs: &[(usize, u64)], vs: &[(usize, u128)]) -> Board {
+    let mut board = Board::with_ram_and_clock(1 << 16, Box::new(ZeroClock));
+    board.machine.bus.ram_mut().write(RAM_BASE, &image(words));
+    board.machine.cpu.pc = RAM_BASE;
+    for &(i, v) in xs {
+        board.machine.cpu.x[i] = v;
+    }
+    for &(i, v) in vs {
+        board.machine.cpu.v[i] = v;
+    }
+    board
+}
+
+/// Turn on an identity MMU: one L1 block descriptor maps the whole RAM gigabyte
+/// VA==PA, so code, page tables, and data are all mapped — the regime the inline
+/// memory fast path needs (it bails when the MMU is off).
+fn enable_identity_mmu(board: &mut Board) {
+    let pt_base = RAM_BASE + 0x2000;
+    // 1 GiB block @ RAM_BASE: valid (bit0), block (bit1=0), AF set (bit10),
+    // AP=00 => EL1 read/write. VA 0x4000_0000 indexes L1 entry 1.
+    let desc: u64 = RAM_BASE | 1 | (1 << 10);
+    board.machine.bus.ram_mut().write(pt_base + 8, &desc.to_le_bytes());
+    board.machine.cpu.ttbr0_el1 = pt_base;
+    board.machine.cpu.tcr_el1 = 25; // T0SZ=25 -> 39-bit VA, walk starts at L1
+    board.machine.cpu.sctlr_el1 = 1; // SCTLR.M = MMU on
+}
+
+fn assert_arch_state_eq(interp: &Machine, jit: &Machine, ctx: &str) {
+    assert_eq!(jit.cpu.x, interp.cpu.x, "X registers ({ctx})");
+    assert_eq!(jit.cpu.sp, interp.cpu.sp, "SP ({ctx})");
+    assert_eq!(jit.cpu.pc, interp.cpu.pc, "PC ({ctx})");
+    assert_eq!(jit.cpu.flags.to_nzcv(), interp.cpu.flags.to_nzcv(), "NZCV ({ctx})");
+    assert_eq!(jit.cpu.v, interp.cpu.v, "V registers ({ctx})");
+    assert_eq!(jit.cpu.fpcr, interp.cpu.fpcr, "FPCR ({ctx})");
+}
+
+/// Run `words` to `exit_off` two ways (interpreter, then JIT-organized) and
+/// assert identical architectural state *and* RAM. `prepare` runs on both
+/// machines after seeding (e.g. enable the MMU). `until` (a PC, not a count)
+/// stops both at the same point; a 2M cap turns a runaway kernel into a loud
+/// failure. `ctx` labels failures.
+fn crosscheck_with(
+    words: &[u32],
+    xs: &[(usize, u64)],
+    vs: &[(usize, u128)],
+    exit_off: u64,
+    ctx: &str,
+    prepare: impl Fn(&mut Board),
+) {
+    const CAP: usize = 2_000_000;
+    let until = RAM_BASE + exit_off;
+
+    let mut interp = machine(words, xs, vs);
+    prepare(&mut interp);
+    interp.machine.run(until, CAP);
+
+    let mut jit = machine(words, xs, vs);
+    prepare(&mut jit);
+    jit_set_memory(wasm_bindgen::memory());
+    jit_set_table(wasm_bindgen::function_table());
+    jit.machine.run_jit_browser(until, CAP, &mut TestRunner);
+
+    assert_eq!(interp.machine.cpu.pc, until, "interpreter reached exit ({ctx})");
+    assert_eq!(jit.machine.cpu.pc, until, "JIT reached exit ({ctx})");
+    assert!(jit.machine.jit_insns() > 0, "a hot block compiled and ran ({ctx})");
+    assert_arch_state_eq(&interp.machine, &jit.machine, ctx);
+    assert!(
+        interp.machine.bus.ram_mut().bytes == jit.machine.bus.ram_mut().bytes,
+        "RAM differs ({ctx})"
+    );
+}
+
+fn crosscheck(words: &[u32], xs: &[(usize, u64)], vs: &[(usize, u128)], exit_off: u64, ctx: &str) {
+    crosscheck_with(words, xs, vs, exit_off, ctx, |_| {});
+}
+
+// ---- Curated kernels: one per lowered family. ----
+
+#[wasm_bindgen_test]
+fn arith_logical_flags() {
+    let code = [
+        add_reg(1, 1, 2),  // x1 += x2
+        eor_reg(3, 1, 2),  // x3 = x1 ^ x2
+        orr_reg(4, 4, 3),  // x4 |= x3
+        subs_imm(0, 0, 1), // x0--, set NZCV
+        cbnz(0, -16),      // loop while x0 != 0
+    ];
+    crosscheck(&code, &[(0, 1000), (1, 0), (2, 0x0123_4567_89AB_CDEF), (3, 0), (4, 0)], &[], 20, "arith");
+}
+
+#[wasm_bindgen_test]
+fn mul_div_csel() {
+    let code = [
+        madd(1, 1, 2, 3),  // x1 = x1*x2 + x3
+        udiv(5, 1, 7),     // x5 = x1 / x7
+        subs_imm(0, 0, 1), // x0--, set flags
+        csel(8, 1, 5, 0),  // x8 = (Z) ? x1 : x5   (cond EQ)
+        cbnz(0, -16),
+    ];
+    crosscheck(&code, &[(0, 500), (1, 1), (2, 3), (3, 7), (5, 0), (7, 9), (8, 0)], &[], 20, "muldiv");
+}
+
+#[wasm_bindgen_test]
+fn bcond_loop() {
+    let code = [
+        add_reg(1, 1, 2),  // x1 += x2
+        subs_imm(0, 0, 1), // x0--, set flags
+        bcond(0b0001, -8), // B.NE loop
+    ];
+    crosscheck(&code, &[(0, 800), (1, 0), (2, 5)], &[], 12, "bcond");
+}
+
+#[wasm_bindgen_test]
+fn simd_vector_add() {
+    let code = [
+        three_same(1, 0, 0b10, 0b10000, 0, 0, 1), // add v0.4s, v0.4s, v1.4s
+        subs_imm(0, 0, 1),
+        cbnz(0, -8),
+    ];
+    let v1 = 0x0000_0001_0000_0002_0000_0003_0000_0004u128; // lanes [4,3,2,1]
+    crosscheck(&code, &[(0, 600)], &[(0, 0), (1, v1)], 12, "simd_add");
+}
+
+#[wasm_bindgen_test]
+fn memory_loads_stores_mmu_on() {
+    let data = RAM_BASE + 0x4000;
+    let code = [
+        str64(2, 1),       // [x1] = x2
+        ldr64(3, 1),       // x3 = [x1]
+        add_imm(2, 2, 1),  // x2++
+        subs_imm(0, 0, 1),
+        cbnz(0, -16),
+    ];
+    crosscheck_with(
+        &code,
+        &[(0, 600), (1, data), (2, 0xAAAA), (3, 0)],
+        &[],
+        20,
+        "memory",
+        enable_identity_mmu,
+    );
+}
+
+// ---- Randomized-operand sweep over the lowered families. ----
+
+/// xorshift64* — deterministic so any failure is reproducible from the seed.
+struct Rng(u64);
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Self(seed ^ 0x9E37_79B9_7F4A_7C15 | 1)
+    }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: u32) -> u32 {
+        (self.next() % u64::from(n)) as u32
+    }
+}
+
+/// A GPR in x1..x15 — never x0 (the loop counter) so the random op can't clobber
+/// control flow.
+fn greg(rng: &mut Rng) -> u32 {
+    1 + rng.below(15)
+}
+/// A vector reg in v0..v15.
+fn vreg(rng: &mut Rng) -> u32 {
+    rng.below(16)
+}
+
+/// A random valid integer data-processing instruction over safe registers.
+fn rand_dp(rng: &mut Rng) -> u32 {
+    let (rd, rn, rm) = (greg(rng), greg(rng), greg(rng));
+    match rng.below(12) {
+        0 => 0x8B00_0000 | (rm << 16) | (rn << 5) | rd,  // ADD
+        1 => 0xCB00_0000 | (rm << 16) | (rn << 5) | rd,  // SUB
+        2 => 0x8A00_0000 | (rm << 16) | (rn << 5) | rd,  // AND
+        3 => 0xAA00_0000 | (rm << 16) | (rn << 5) | rd,  // ORR
+        4 => 0xCA00_0000 | (rm << 16) | (rn << 5) | rd,  // EOR
+        5 => 0xAB00_0000 | (rm << 16) | (rn << 5) | rd,  // ADDS
+        6 => 0xEB00_0000 | (rm << 16) | (rn << 5) | rd,  // SUBS
+        7 => 0x9B00_0000 | (rm << 16) | (greg(rng) << 10) | (rn << 5) | rd, // MADD
+        8 => 0x9AC0_0800 | (rm << 16) | (rn << 5) | rd,  // UDIV (÷0 -> 0, defined)
+        9 => 0x9AC0_0C00 | (rm << 16) | (rn << 5) | rd,  // SDIV
+        10 => 0x9AC0_2000 | (rm << 16) | (rn << 5) | rd, // LSLV
+        _ => 0x9A80_0000 | (rm << 16) | (rng.below(16) << 12) | (rn << 5) | rd, // CSEL
+    }
+}
+
+/// A random valid SIMD three-same instruction over safe vector registers; every
+/// form chosen here is inline-lowered by the JIT.
+fn rand_simd(rng: &mut Rng) -> u32 {
+    let (rd, rn, rm) = (vreg(rng), vreg(rng), vreg(rng));
+    let mut q = rng.below(2);
+    let (u, size, opcode) = match rng.below(6) {
+        0 => {
+            let s = rng.below(4); // ADD: 2D (size 3) needs Q=1
+            if s == 3 {
+                q = 1;
+            }
+            (0, s, 0b10000)
+        }
+        1 => {
+            let s = rng.below(4); // SUB
+            if s == 3 {
+                q = 1;
+            }
+            (1, s, 0b10000)
+        }
+        2 => (0, rng.below(3), 0b10011), // MUL (no 2D)
+        3 => (0, 0b00, 0b00011),         // AND
+        4 => (0, 0b10, 0b00011),         // ORR
+        _ => (1, 0b00, 0b00011),         // EOR
+    };
+    three_same(q, u, size, opcode, rd, rn, rm)
+}
+
+#[wasm_bindgen_test]
+fn random_lowering_sweep() {
+    let mut rng = Rng::new(0xC0FFEE_1234);
+    for i in 0..192u32 {
+        let simd = i & 1 == 0;
+        let w = if simd { rand_simd(&mut rng) } else { rand_dp(&mut rng) };
+        // [W ; subs x0,#1 ; cbnz x0] — W over x1..x15 / v0..v15 can't touch x0.
+        let code = [w, subs_imm(0, 0, 1), cbnz(0, -8)];
+
+        let mut xs = vec![(0usize, 400u64)]; // counter past JIT_HOTNESS
+        for r in 1..16usize {
+            xs.push((r, rng.next()));
+        }
+        let mut vs = Vec::new();
+        if simd {
+            for r in 0..16usize {
+                vs.push((r, (u128::from(rng.next()) << 64) | u128::from(rng.next())));
+            }
+        }
+        crosscheck(&code, &xs, &vs, 12, &format!("sweep i={i} w={w:#010x}"));
+    }
+}
