@@ -27,6 +27,8 @@ pub use clock::{Clock, HostClock, DEFAULT_FREQ_HZ};
 pub use fdt::{virt_dtb, DtbConfig, FdtBuilder};
 pub use gic::{Gic, GicCpu, GicDist};
 pub use machine::Machine;
+#[cfg(feature = "jit")]
+pub use machine::BlockRunner;
 pub use uart::{Uart, UartDevice};
 pub use virtio::{
     InputKind, VirtioBlk, VirtioBlkMmio, VirtioGpu, VirtioGpuMmio, VirtioInput, VirtioInputMmio,

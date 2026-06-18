@@ -31,12 +31,40 @@ pub struct Abort {
 /// the zero register (`XZR`/`WZR`, reads as 0 and discards writes) or the stack
 /// pointer (`SP`). Callers select which via the `sp` flag on [`Self::read_gpr`]
 /// / [`Self::write_gpr`].
+///
+/// **Layout matters.** `#[repr(C)]` pins the leading fields — `x`, `sp`, `pc`,
+/// `nzcv` — to the exact byte offsets in [`regs::offsets`](crate::regs::offsets)
+/// that generated JIT blocks load/store (asserted below). In the browser the
+/// whole `CpuState` lives in the WASM linear memory the blocks share, so the
+/// organizer hands a block a pointer straight at this struct and the block
+/// mutates the real registers in place — no per-block image copy. Everything
+/// after `nzcv` is private to the interpreter and never touched by a block.
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct CpuState {
     /// X0..X30. X31 is *not* stored here — see [`Self::read_gpr`].
     pub x: [u64; 31],
     pub sp: u64,
     pub pc: u64,
+    /// Packed NZCV (bit31 N, bit30 Z, bit29 C, bit28 V) — the form generated JIT
+    /// blocks read/write at [`offsets::NZCV`](crate::regs::offsets::NZCV). The
+    /// interpreter works in [`flags`](Self::flags) (four bools, faster for its
+    /// flag-heavy hot path); the organizer bridges the two (one `u64`) around a
+    /// block run. Stale outside that window — read [`flags`](Self::flags) instead.
+    pub nzcv: u64,
+    /// Instructions a compiled block reports executing, written by the block just
+    /// before it returns (a block that loops internally runs many iterations per
+    /// call, so the organizer can't infer the count from the static block length).
+    /// Host-side JIT bookkeeping; meaningful only right after a block run. Its
+    /// offset is exported as [`JIT_COUNT_OFFSET`](crate::JIT_COUNT_OFFSET).
+    pub jit_count: u64,
+    /// Set to 1 by a compiled block that **bailed** mid-way — it hit a memory
+    /// access its inline fast path can't handle (TLB miss, MMIO, permission
+    /// fault, or page-crossing), stored its partial [`jit_count`](Self::jit_count)
+    /// and the faulting PC, and returned. The organizer interprets that one
+    /// instruction and resumes. Host-side JIT bookkeeping; cleared before each
+    /// block run. Offset exported as [`JIT_EXIT_OFFSET`](crate::JIT_EXIT_OFFSET).
+    pub jit_exit: u64,
     pub flags: Flags,
     /// SIMD/FP registers V0..V31 (128-bit). Scalar FP uses the low bits.
     pub v: [u128; 32],
@@ -91,7 +119,42 @@ pub struct CpuState {
     /// architectural — a host-side hint the JIT organizer reads (and clears) to
     /// drop stale compiled blocks. The pure interpreter ignores it.
     pub ic_inval: bool,
+    /// Set whenever the TLB is flushed (TTBR/TCR/SCTLR write or `TLBI`) — i.e. a
+    /// VA→PA mapping may have changed. Not architectural — a host-side hint the
+    /// JIT organizer reads (and clears) to drop VA-keyed compiled blocks, whose
+    /// baked-in PCs are only valid for the translation regime they were compiled
+    /// in (so they must go when the MMU toggles or a process switches).
+    pub tlb_flushed: bool,
 }
+
+// The leading fields must sit at exactly the offsets generated JIT blocks use,
+// since a block reads/writes them directly in the shared `CpuState`. If this
+// fails, the `#[repr(C)]` layout drifted from `regs::offsets` — fix one or the
+// other; they are the contract between the interpreter and emitted code.
+const _: () = {
+    assert!(std::mem::offset_of!(CpuState, x) == crate::regs::offsets::X);
+    assert!(std::mem::offset_of!(CpuState, sp) == crate::regs::offsets::SP);
+    assert!(std::mem::offset_of!(CpuState, pc) == crate::regs::offsets::PC);
+    assert!(std::mem::offset_of!(CpuState, nzcv) == crate::regs::offsets::NZCV);
+};
+
+/// Byte offset of [`CpuState::jit_count`] within `CpuState`, for the JIT emitter
+/// to store the per-block instruction count a block executed (it shares the
+/// `#[repr(C)]` layout via the asserts above). Not a `GuestRegs` field — it's
+/// past the architectural register window.
+pub const JIT_COUNT_OFFSET: usize = std::mem::offset_of!(CpuState, jit_count);
+
+/// Byte offset of [`CpuState::jit_exit`] — the block's mid-way bail flag.
+pub const JIT_EXIT_OFFSET: usize = std::mem::offset_of!(CpuState, jit_exit);
+
+/// Byte offset of [`CpuState::tlb`]. The JIT's inline memory fast path loads the
+/// TLB entry array pointer from here (the `Box<[Entry; N]>` is a thin pointer at
+/// this offset) and indexes it — see `tlb::ENTRY_*`.
+pub const TLB_OFFSET: usize = std::mem::offset_of!(CpuState, tlb);
+
+/// Byte offset of [`CpuState::el`] — the inline memory fast path reads it for the
+/// EL-dependent permission check.
+pub const EL_OFFSET: usize = std::mem::offset_of!(CpuState, el);
 
 impl Default for CpuState {
     fn default() -> Self {
@@ -99,6 +162,9 @@ impl Default for CpuState {
             x: [0; 31],
             sp: 0,
             pc: 0,
+            nzcv: 0,
+            jit_count: 0,
+            jit_exit: 0,
             flags: Flags::default(),
             v: [0; 32],
             sctlr_el1: 0,
@@ -118,6 +184,7 @@ impl Default for CpuState {
             wfi: false,
             tlb: Tlb::new(),
             ic_inval: false,
+            tlb_flushed: false,
         }
     }
 }
@@ -129,9 +196,11 @@ impl CpuState {
     }
 
     /// Drop all cached stage-1 translations. Called when a translation may have
-    /// changed: a `TLBI` instruction, or a write to TTBR0/TTBR1/TCR/SCTLR.
+    /// changed: a `TLBI` instruction, or a write to TTBR0/TTBR1/TCR/SCTLR. Also
+    /// flags [`tlb_flushed`](Self::tlb_flushed) for the JIT organizer.
     pub fn flush_tlb(&mut self) {
         self.tlb.flush();
+        self.tlb_flushed = true;
     }
 
     /// Read a general-purpose register. When `idx == 31`, `sp` chooses between

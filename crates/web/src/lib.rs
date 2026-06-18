@@ -8,7 +8,7 @@
 
 use aarch64_cpu_state::CpuState;
 use aarch64_interp::{run, Memory, StopReason};
-use aarch64_platform::{Board, Clock, InputKind, DEFAULT_FREQ_HZ};
+use aarch64_platform::{Board, BlockRunner, Clock, InputKind, DEFAULT_FREQ_HZ};
 use wasm_bindgen::prelude::*;
 
 /// Guest base address the code blob is loaded at (for [`run_code`]).
@@ -45,6 +45,71 @@ impl Clock for WasmClock {
     }
 }
 
+// The JIT compile backend, in JS over the `WebAssembly` API. `jit_set_memory`
+// gives it this module's linear memory (so compiled blocks share it and read the
+// register image — the live `CpuState` — at `regs_base`); `jit_set_table` gives
+// it this module's indirect function table. `jit_compile` instantiates a block
+// module (importing that memory), appends its `block` export to the table, and
+// returns the slot index.
+//
+// Crucially, *running* a block is **not** here: a table slot index is just a
+// Rust fn-pointer value in wasm, so [`WasmRunner::run`] calls it with a direct
+// `call_indirect` — no JS round-trip per block (the previous `jit_run` hop was
+// the dominant per-block cost). JS is touched only at compile time.
+#[wasm_bindgen(inline_js = "
+let mem = null;
+let table = null;
+export function jit_set_memory(m) { mem = m; }
+export function jit_set_table(t) { table = t; }
+export function jit_compile(bytes) {
+    const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), { env: { memory: mem } });
+    const idx = table.grow(1);               // append a slot; returns its index
+    table.set(idx, inst.exports.block);
+    return idx;
+}
+export function jit_invalidate() { /* table slots leak until the table is reused; the organizer drops the handles so stale blocks are never called */ }
+")]
+extern "C" {
+    fn jit_set_memory(mem: JsValue);
+    fn jit_set_table(table: JsValue);
+    fn jit_compile(bytes: &[u8]) -> u32;
+    fn jit_invalidate();
+}
+
+/// [`BlockRunner`] over the browser/node `WebAssembly` API. Compilation goes
+/// through JS; execution is a direct in-wasm `call_indirect`.
+struct WasmRunner;
+
+impl BlockRunner for WasmRunner {
+    fn compile(&mut self, wasm: &[u8]) -> u32 {
+        jit_compile(wasm)
+    }
+    fn run(&mut self, handle: u32, regs_base: u32, ram_base: u32) -> u64 {
+        // `handle` is the block's slot in this module's indirect function table.
+        // A wasm fn pointer *is* that table index, so transmuting it yields a
+        // callable pointer and the call lowers to `call_indirect` — entirely
+        // inside wasm, with no JS boundary crossing. The block's type
+        // `(i32, i32) -> i64` matches this signature, so `call_indirect`
+        // type-checks. (wasm32-only: a fn pointer and `usize` are both the
+        // 32-bit table index.)
+        let block: extern "C" fn(u32, u32) -> u64 =
+            unsafe { core::mem::transmute(handle as usize) };
+        block(regs_base, ram_base)
+    }
+    fn invalidate(&mut self) {
+        jit_invalidate();
+    }
+}
+
+/// Map a stop reason to the JS status code (0 = ran/idle, 1 = off, 2 = unsupported).
+fn status_code(stop: StopReason) -> u32 {
+    match stop {
+        StopReason::PoweredOff => 1,
+        StopReason::Unsupported { .. } => 2,
+        _ => 0,
+    }
+}
+
 /// A full `virt` machine booting a Linux `Image`, driven from JS. The host calls
 /// [`run`](Emulator::run) in a loop and drains [`take_uart`](Emulator::take_uart)
 /// for console output.
@@ -71,14 +136,23 @@ impl Emulator {
         self.board.boot_image(image, initrd, bootargs);
     }
 
-    /// Run up to `budget` guest instructions. Returns a status code:
-    /// 0 = ran (or went idle), 1 = powered off, 2 = unsupported instruction.
+    /// Run up to `budget` guest instructions (interpreter only). Returns a status
+    /// code: 0 = ran (or went idle), 1 = powered off, 2 = unsupported instruction.
     pub fn run(&mut self, budget: usize) -> u32 {
-        match self.board.machine.run(0, budget) {
-            StopReason::PoweredOff => 1,
-            StopReason::Unsupported { .. } => 2,
-            _ => 0,
-        }
+        status_code(self.board.machine.run(0, budget))
+    }
+
+    /// Like [`run`](Self::run), but JIT-organized: hot blocks are compiled to
+    /// WASM and run via the browser `WebAssembly` engine; cold code is
+    /// interpreted. Blocks share this module's linear memory.
+    pub fn run_jit(&mut self, budget: usize) -> u32 {
+        // Hand the JIT engine this module's memory (compiled blocks share it) and
+        // its indirect function table (blocks are appended there and called via
+        // `call_indirect`).
+        jit_set_memory(wasm_bindgen::memory());
+        jit_set_table(wasm_bindgen::function_table());
+        let mut runner = WasmRunner;
+        status_code(self.board.machine.run_jit_browser(0, budget, &mut runner))
     }
 
     /// Drain and return pending UART (serial console) output.
@@ -89,5 +163,15 @@ impl Emulator {
     /// Total guest instructions retired since boot.
     pub fn total_insns(&self) -> u64 {
         self.board.machine.total_insns()
+    }
+
+    /// Guest instructions retired inside hot compiled blocks (JIT coverage).
+    pub fn jit_insns(&self) -> u64 {
+        self.board.machine.jit_insns()
+    }
+
+    /// Number of compiled-block invocations (for average-block-length stats).
+    pub fn jit_calls(&self) -> u64 {
+        self.board.machine.jit_calls()
     }
 }

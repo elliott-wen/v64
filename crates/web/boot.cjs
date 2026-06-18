@@ -10,8 +10,11 @@ const image = readFileSync("guest/prebuilt/Image-tiny");
 const initrd = readFileSync("guest/prebuilt/uitest.cpio.gz");
 const bootargs = "earlycon=pl011,0x9000000 console=ttyAMA0 rdinit=/init";
 
+const useJit = process.argv.includes("--jit");
 const emu = new Emulator();
 emu.boot(image, initrd, bootargs);
+const run = useJit ? (b) => emu.run_jit(b) : (b) => emu.run(b);
+console.log(`[mode: ${useJit ? "JIT" : "interpreter"}]`);
 
 const BATCH = 2_000_000;
 const MAX_BATCHES = 400; // up to ~800M instructions
@@ -20,7 +23,7 @@ let out = "";
 let status = 0;
 
 for (let i = 0; i < MAX_BATCHES; i++) {
-  status = emu.run(BATCH);
+  status = run(BATCH);
   const u = emu.take_uart();
   if (u.length) {
     const s = Buffer.from(u).toString("latin1");

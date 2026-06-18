@@ -8,15 +8,21 @@ license.workspace = true
 aarch64-cpu-state.workspace = true
 aarch64-decoder.workspace = true
 aarch64-interp.workspace = true
+# Pure WASM-block emitter (no wasmtime) — the Machine's JIT organizer uses it to
+# emit blocks; a host-provided `BlockRunner` (the browser's `WebAssembly`)
+# executes them. Only the `jit` feature (browser/node) needs it; native interp
+# builds leave it out.
+aarch64-jit = { workspace = true, optional = true }
 # SDL is the desktop front-end; it doesn't build for wasm32, so it's optional.
-# A wasm build uses `--no-default-features` (no SDL). The Machine is
-# interpreter-only on every target — the JIT lives in the browser, so there is
-# no wasmtime dependency here.
+# A wasm build uses `--no-default-features` (no SDL).
 sdl2 = { version = "0.37", optional = true }
 
 [features]
 default = ["sdl"]
 sdl = ["dep:sdl2"]
+# The WASM JIT organizer (`run_jit_browser` + the `BlockRunner` trait). Off for
+# native builds, which only interpret; the browser/node front-end enables it.
+jit = ["dep:aarch64-jit"]
 
 # The SDL UI bin is native-only (a wasm build skips it).
 [[bin]]

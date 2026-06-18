@@ -6,6 +6,9 @@
 //! timer from the clock, asserts the timer's PPI when it fires, and injects an
 //! asynchronous IRQ exception when the GIC is asserting a line and `PSTATE.I` is
 //! clear.
+//!
+//! The optional WASM JIT organizer (gated by the `jit` feature, used by the
+//! browser/node front-end) lives in the [`jit`] submodule; native builds omit it.
 
 use std::collections::BTreeMap;
 
@@ -17,6 +20,11 @@ use aarch64_interp::{
 
 use crate::clock::{Clock, HostClock, DEFAULT_FREQ_HZ};
 use crate::{Bus, DmaDevice, Gic};
+
+#[cfg(feature = "jit")]
+mod jit;
+#[cfg(feature = "jit")]
+pub use jit::BlockRunner;
 
 /// PSTATE.I (IRQ mask) within the packed DAIF nibble `[D,A,I,F]`.
 const PSTATE_I: u8 = 0b0010;
@@ -71,6 +79,20 @@ pub struct Machine {
     /// monotonically increasing counter). Not architectural — a host-side stat
     /// for throughput reporting (instructions/sec). Idle WFI sleeps don't count.
     total_insns: u64,
+    /// Of [`total_insns`](Self::total_insns), how many were retired inside a hot
+    /// compiled block (vs. interpreted). A host-side stat for JIT-coverage
+    /// reporting; the ratio tells you how much of the workload the JIT captured.
+    #[cfg(feature = "jit")]
+    jit_insns: u64,
+    /// Number of hot-block invocations (for average-block-length reporting).
+    #[cfg(feature = "jit")]
+    jit_calls: u64,
+    /// JIT organizer state: per-physical-address block classification
+    /// (cold/hot/plain). See [`jit`]. Compiled blocks read/write the live
+    /// `CpuState` directly (it's `#[repr(C)]` in shared linear memory), so there
+    /// is no separate register image to hold here.
+    #[cfg(feature = "jit")]
+    jit_cache: std::collections::HashMap<u64, jit::JitBlock>,
 }
 
 impl Machine {
@@ -99,6 +121,12 @@ impl Machine {
             dma: Vec::new(),
             idle_until: None,
             total_insns: 0,
+            #[cfg(feature = "jit")]
+            jit_insns: 0,
+            #[cfg(feature = "jit")]
+            jit_calls: 0,
+            #[cfg(feature = "jit")]
+            jit_cache: std::collections::HashMap::new(),
         }
     }
 

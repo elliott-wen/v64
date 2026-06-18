@@ -44,10 +44,13 @@
 //! returned `i64` so the full 64-bit guest PC stays unambiguous and the reason
 //! space is freely extensible.
 
-use aarch64_cpu_state::regs::offsets;
+use aarch64_cpu_state::{regs::offsets, GuestRegs};
 
 /// Base of the `GuestRegs` image in linear memory.
 pub const REGS_BASE: u32 = 0;
+
+/// Size of the `GuestRegs` image, in bytes (for allocating the image buffer).
+pub const REGS_SIZE: usize = offsets::SIZE;
 
 /// Base of the runtime control block (just past the register image, aligned).
 pub const CTRL_BASE: u32 = 0x340; // offsets::SIZE == 0x320, rounded up to 0x40.
@@ -83,3 +86,54 @@ pub fn ram_offset(addr: u64, guest_base: u64) -> usize {
 
 /// Compile-time sanity: the control block must not overlap the register image.
 const _: () = assert!(CTRL_BASE as usize >= offsets::SIZE);
+
+// --- register-image (de)serialization --------------------------------------
+//
+// The organizer syncs the guest hot register file to/from the image at
+// `REGS_BASE` around a block run; the emitted block reads/writes it directly.
+
+fn rd_u64(mem: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes(mem[off..off + 8].try_into().unwrap())
+}
+
+fn wr_u64(mem: &mut [u8], off: usize, val: u64) {
+    mem[off..off + 8].copy_from_slice(&val.to_le_bytes());
+}
+
+/// Decode a [`GuestRegs`] image at `base` from a linear-memory byte slice.
+#[must_use]
+pub fn read_regs(mem: &[u8], base: usize) -> GuestRegs {
+    let rd16 =
+        |off: usize| u128::from_le_bytes(mem[base + off..base + off + 16].try_into().unwrap());
+    let mut x = [0u64; 31];
+    for (i, slot) in x.iter_mut().enumerate() {
+        *slot = rd_u64(mem, base + offsets::x(i));
+    }
+    let mut v = [0u128; 32];
+    for (i, slot) in v.iter_mut().enumerate() {
+        *slot = rd16(offsets::v(i));
+    }
+    GuestRegs {
+        x,
+        sp: rd_u64(mem, base + offsets::SP),
+        pc: rd_u64(mem, base + offsets::PC),
+        nzcv: rd_u64(mem, base + offsets::NZCV),
+        v,
+        fpcr: rd_u64(mem, base + offsets::FPCR),
+    }
+}
+
+/// Encode a [`GuestRegs`] image at `base` into a linear-memory byte slice.
+pub fn write_regs(mem: &mut [u8], base: usize, regs: &GuestRegs) {
+    for (i, val) in regs.x.iter().enumerate() {
+        wr_u64(mem, base + offsets::x(i), *val);
+    }
+    wr_u64(mem, base + offsets::SP, regs.sp);
+    wr_u64(mem, base + offsets::PC, regs.pc);
+    wr_u64(mem, base + offsets::NZCV, regs.nzcv);
+    for (i, val) in regs.v.iter().enumerate() {
+        let off = base + offsets::v(i);
+        mem[off..off + 16].copy_from_slice(&val.to_le_bytes());
+    }
+    wr_u64(mem, base + offsets::FPCR, regs.fpcr);
+}

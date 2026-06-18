@@ -30,6 +30,11 @@ const TLB_SIZE: usize = 1024;
 /// always zero — `u64::MAX` (all ones) can never collide with a valid tag.
 const EMPTY: u64 = u64::MAX;
 
+/// `#[repr(C)]` so generated JIT blocks can read entries directly out of the TLB
+/// in shared linear memory (the planned inline-memory fast path): field offsets
+/// are pinned and exported as [`ENTRY_TAG`]/[`ENTRY_PA`]/[`ENTRY_PERMS`], stride
+/// [`ENTRY_SIZE`], count [`ENTRIES`].
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     /// 4KB-aligned VA this entry maps, or [`EMPTY`].
@@ -39,6 +44,14 @@ struct Entry {
     /// MMU-packed resolved permissions + leaf level (opaque here).
     perms: u8,
 }
+
+/// Byte offsets and stride of [`Entry`], for the JIT's inline TLB read.
+pub const ENTRY_TAG: usize = std::mem::offset_of!(Entry, tag);
+pub const ENTRY_PA: usize = std::mem::offset_of!(Entry, pa);
+pub const ENTRY_PERMS: usize = std::mem::offset_of!(Entry, perms);
+pub const ENTRY_SIZE: usize = std::mem::size_of::<Entry>();
+/// Number of direct-mapped entries (power of two; index = `(va>>12) & (ENTRIES-1)`).
+pub const ENTRIES: usize = TLB_SIZE;
 
 /// A direct-mapped VA-page → PA-page translation cache. See the module docs.
 #[derive(Debug, Clone)]

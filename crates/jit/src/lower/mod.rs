@@ -35,17 +35,94 @@ mod memory;
 mod simd;
 mod terminator;
 
-use aarch64_decoder::Insn;
-use wasm_encoder::Function;
+use aarch64_decoder::{Block, Insn};
+use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
 
 use arith::BOp;
-use common::advance_pc;
 
 pub(crate) use common::{SCRATCH_I32, SCRATCH_I64};
-pub(crate) use terminator::lower_terminator;
+pub(crate) use memory::{lower_mem, lower_mem_pair};
+pub(crate) use terminator::{lower_terminator, taken_target};
+
+/// Iteration cap on an internally-emitted self-loop before it returns to the
+/// organizer so timers/IRQs get serviced — our analogue of v86's `LOOP_COUNTER`.
+/// Only pure-ALU self-loops (no memory ops) are emitted as loops, so they can't
+/// be waiting on external state; this just bounds timer latency.
+const MAX_LOOP: u32 = 8192;
+
+/// Emit the block prologue: cache the runtime entry PC for position-independent
+/// PC math. Must be emitted before any lowering. See `common::PC0`.
+pub(crate) fn prologue(f: &mut Function) {
+    common::load_entry_pc(f);
+}
+
+/// Push a position-independent guest PC (`runtime entry PC + (abs - entry_pc)`).
+/// Used for a block's sequential fall-through result. See `common::gen_rel_pc`.
+pub(crate) fn gen_pc(f: &mut Function, abs: u64, entry_pc: u64) {
+    common::gen_rel_pc(f, abs, entry_pc);
+}
+
+/// Record, in the block's `jit_count` slot, that it retired `count` instructions
+/// — for a straight-line block, its static length (one pass per call).
+pub(crate) fn store_count(f: &mut Function, count: u64) {
+    common::store_count_const(f, count);
+}
+
+/// Emit a block whose terminator branches back to its own entry as an internal
+/// wasm `loop`, so the iterations run in compiled code instead of one organizer
+/// round-trip per iteration. Bounded by [`MAX_LOOP`] (then it returns the entry
+/// PC so the organizer re-enters after servicing async events). Reports the
+/// instruction count it actually ran via the `jit_count` slot.
+///
+/// Shape (`$exit` outer, `$top` the loop):
+/// ```text
+///   block $exit (result i64)
+///     loop $top
+///       <body>                       ;; the non-terminator instructions
+///       <taken?>                      ;; i32: 1 = branch back to entry
+///       PASSES += 1
+///       if (taken)
+///         if (PASSES < MAX_LOOP) { br $top }            ;; keep looping in-wasm
+///         else { jit_count = PASSES*len; -> $exit(entry) } ;; yield to organizer
+///       else { jit_count = PASSES*len; -> $exit(fallthrough) }  ;; loop done
+///     end
+///     unreachable                     ;; only reached via the brs above
+///   end
+/// ```
+pub(crate) fn emit_self_loop(f: &mut Function, block: &Block, entry_pc: u64) {
+    let n = block.insns.len();
+    let (last_pc, last_insn) = &block.insns[n - 1];
+    let fallthrough = last_pc.wrapping_add(4);
+
+    emit!(f, I::Block(BlockType::Result(ValType::I64))); // $exit
+    emit!(f, I::Loop(BlockType::Empty)); // $top
+    for (pc, insn) in &block.insns[..n - 1] {
+        let ok = lower_sequential(f, insn, *pc, entry_pc, 0);
+        debug_assert!(ok, "self-loop body instruction must be inline-lowerable");
+    }
+    terminator::emit_taken_cond(f, last_insn); // i32: 1 = take the back-branch
+    emit!(f, I::LocalGet(common::PASSES), I::I32Const(1), I::I32Add, I::LocalSet(common::PASSES));
+    emit!(f, I::If(BlockType::Empty)); // taken?
+    emit!(f, I::LocalGet(common::PASSES), I::I32Const(MAX_LOOP as i32), I::I32LtU);
+    emit!(f, I::If(BlockType::Empty)); // under the iteration cap?
+    emit!(f, I::Br(2)); // continue: -> loop $top
+    emit!(f, I::Else);
+    common::store_count_loop(f, n as u64);
+    common::gen_rel_pc(f, entry_pc, entry_pc); // yield: re-enter at the loop top
+    emit!(f, I::Br(3)); // -> block $exit
+    emit!(f, I::End);
+    emit!(f, I::Else); // not taken: the loop is done
+    common::store_count_loop(f, n as u64);
+    common::gen_rel_pc(f, fallthrough, entry_pc);
+    emit!(f, I::Br(2)); // -> block $exit
+    emit!(f, I::End);
+    emit!(f, I::End); // end loop $top
+    emit!(f, I::Unreachable); // unreachable: every path above branches out
+    emit!(f, I::End); // end block $exit — leaves the next PC (i64) on the stack
+}
 
 /// Try to lower a non-terminator instruction. On success advances the image PC.
-pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, guest_base: u64) -> bool {
+pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, entry_pc: u64, guest_base: u64) -> bool {
     match *insn {
         // NOP and PRFM (prefetch hint) have no architectural effect.
         Insn::Nop | Insn::Prfm => {}
@@ -70,7 +147,7 @@ pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, guest_bas
             arith::add_sub_carry(f, sf, sub, set_flags, rm, rn, rd);
         }
         Insn::Extract { sf, rm, rn, lsb, rd } => arith::extract(f, sf, rm, rn, lsb, rd),
-        Insn::PcRel { page, imm, rd } => arith::pc_rel(f, page, imm, rd, pc),
+        Insn::PcRel { page, imm, rd } => arith::pc_rel(f, page, imm, rd, pc, entry_pc),
         Insn::CondSelect { sf, op, o2, cond, rm, rn, rd } => cond::cond_select(f, sf, op, o2, cond, rm, rn, rd),
         Insn::CondCompare { sf, sub, is_imm, imm_y, rm, cond, nzcv, rn } => {
             cond::cond_compare(f, sf, sub, is_imm, imm_y, rm, cond, nzcv, rn);
@@ -133,15 +210,12 @@ pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, guest_bas
         }
         _ => return false,
     }
-    advance_pc(f, pc);
     true
 }
 
-/// Advance the PC and report success only when the inner lowering succeeded.
-/// (The fallible lowerings never emit before deciding, so `false` is clean.)
-fn finish(f: &mut Function, pc: u64, ok: bool) -> bool {
-    if ok {
-        advance_pc(f, pc);
-    }
+/// Report whether the inner lowering succeeded. (Inline blocks never write the
+/// image PC per instruction — the organizer overwrites `cpu.pc` with the block's
+/// returned next PC — so there's nothing to do but propagate the result.)
+fn finish(_f: &mut Function, _pc: u64, ok: bool) -> bool {
     ok
 }

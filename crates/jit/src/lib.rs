@@ -20,5 +20,8 @@ mod lower;
 // Block discovery lives in the decoder crate (shared with the interpreter);
 // re-export for existing consumers.
 pub use aarch64_decoder::{form_block, Block};
-pub use eligible::{can_inline, form_jit_block};
+pub use eligible::{
+    can_inline, form_jit_block, form_region, is_inline_load_store, is_inline_load_store_pair,
+    is_inline_mem, Region,
+};
 pub use emit::{emit_block, BLOCK_FUNC};

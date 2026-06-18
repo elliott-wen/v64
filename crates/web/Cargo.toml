@@ -16,6 +16,6 @@ aarch64-interp.workspace = true
 # Interpreter-only Machine (no SDL, no JIT/wasmtime) — the wasm-friendly core.
 # Direct path dep (not workspace-inherited) so `default-features = false` is
 # honored and SDL is not pulled in.
-aarch64-platform = { path = "../platform", default-features = false }
+aarch64-platform = { path = "../platform", default-features = false, features = ["jit"] }
 # Pinned to the installed `wasm-bindgen-cli` version (the two must match exactly).
 wasm-bindgen = "=0.2.125"

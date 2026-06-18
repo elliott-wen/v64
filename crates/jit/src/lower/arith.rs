@@ -274,11 +274,27 @@ pub(super) fn extract(f: &mut Function, sf: bool, rm: u8, rn: u8, lsb: u8, rd: u
     store_local(f, rd, sf, false, T0);
 }
 
-/// ADR / ADRP — PC-relative address (always a 64-bit result).
-pub(super) fn pc_rel(f: &mut Function, page: bool, imm: i64, rd: u8, pc: u64) {
-    let base = if page { pc & !0xfff } else { pc };
-    let result = base.wrapping_add(imm as u64);
-    if let Some(off) = dest_off(rd, false) {
-        emit!(f, I::LocalGet(0), I::I64Const(result as i64), I::I64Store(at(off)));
+/// ADR / ADRP — PC-relative address (always a 64-bit result). Position-independent:
+/// the runtime PC is `PC0 + (pc - entry_pc)`, so the result tracks wherever the
+/// block is actually mapped (see `gen_rel_pc`).
+pub(super) fn pc_rel(f: &mut Function, page: bool, imm: i64, rd: u8, pc: u64, entry_pc: u64) {
+    let Some(off) = dest_off(rd, false) else { return };
+    emit!(f, I::LocalGet(0)); // regs_base, for the store below
+    if page {
+        // ADRP: (runtime_pc & ~0xfff) + imm.
+        emit!(
+            f,
+            I::LocalGet(PC0),
+            I::I64Const(pc.wrapping_sub(entry_pc) as i64),
+            I::I64Add,
+            I::I64Const(!0xfff_i64),
+            I::I64And,
+            I::I64Const(imm),
+            I::I64Add
+        );
+    } else {
+        // ADR: runtime_pc + imm = PC0 + (pc + imm - entry_pc).
+        gen_rel_pc(f, pc.wrapping_add(imm as u64), entry_pc);
     }
+    emit!(f, I::I64Store(at(off)));
 }

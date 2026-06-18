@@ -11,5 +11,7 @@ mod tlb;
 
 pub use flags::Flags;
 pub use regs::GuestRegs;
-pub use state::{Abort, CpuState, SP_OR_ZR};
-pub use tlb::Tlb;
+pub use state::{
+    Abort, CpuState, EL_OFFSET, JIT_COUNT_OFFSET, JIT_EXIT_OFFSET, SP_OR_ZR, TLB_OFFSET,
+};
+pub use tlb::{Tlb, ENTRIES as TLB_ENTRIES, ENTRY_PA, ENTRY_PERMS, ENTRY_SIZE, ENTRY_TAG};

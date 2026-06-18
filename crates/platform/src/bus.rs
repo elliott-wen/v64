@@ -94,6 +94,16 @@ impl Bus {
         &mut self.ram
     }
 
+    /// `(host_base, phys_base, size)` of guest RAM for the JIT's inline memory
+    /// fast path: `host_base` is the RAM image's byte offset in the (wasm) linear
+    /// memory, `phys_base`/`size` bound the guest-physical RAM window. A generated
+    /// block maps a translated PA `pa` to `host_base + (pa - phys_base)` after
+    /// checking `pa - phys_base < size`.
+    #[must_use]
+    pub fn ram_jit_info(&self) -> (u32, u64, u64) {
+        (self.ram.bytes.as_ptr() as u32, self.ram.base, self.ram.bytes.len() as u64)
+    }
+
     fn route(&self, addr: u64) -> Route {
         let ram_end = self.ram.base + self.ram.bytes.len() as u64;
         if addr >= self.ram.base && addr < ram_end {

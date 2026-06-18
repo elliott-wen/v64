@@ -5,23 +5,39 @@
 //! width (`sf`) and SP-vs-ZR for r31 follow `CpuState`'s `read`/`write` rules.
 
 use aarch64_cpu_state::regs::offsets;
+use aarch64_cpu_state::JIT_COUNT_OFFSET;
 use wasm_encoder::{Function, Instruction as I, MemArg};
 
-// Scratch i64 locals (local 0 is the i32 `regs_base` parameter). Each lowering
-// fully consumes them within itself, so they can be reused across instructions.
-pub(super) const T0: u32 = 1;
-pub(super) const T1: u32 = 2;
-pub(super) const T2: u32 = 3;
-pub(super) const T3: u32 = 4;
-pub(super) const T4: u32 = 5;
-/// Number of scratch i64 locals the block function must declare (indices 1..=5;
-/// local 0 is the i32 `regs_base` parameter).
-pub(crate) const SCRATCH_I64: u32 = 5;
-/// Number of scratch i32 locals (one: the computed linear address, [`ADDR`]).
-pub(crate) const SCRATCH_I32: u32 = 1;
-/// The i32 scratch local holding a computed linear memory address. Index follows
-/// the i64 scratch locals (param + 5 i64 -> index 6).
-pub(super) const ADDR: u32 = SCRATCH_I64 + 1;
+// The block function takes two i32 params: `regs_base` (the live `CpuState`) and
+// `ram_base` (the host base of guest RAM, for the inline memory fast path).
+pub(super) const REGS_BASE: u32 = 0;
+pub(super) const RAM_BASE: u32 = 1;
+/// First scratch-local index (just past the two parameters).
+const SCRATCH0: u32 = 2;
+
+// Scratch i64 locals. Each lowering fully consumes them within itself, so they
+// can be reused across instructions.
+pub(super) const T0: u32 = SCRATCH0;
+pub(super) const T1: u32 = SCRATCH0 + 1;
+pub(super) const T2: u32 = SCRATCH0 + 2;
+pub(super) const T3: u32 = SCRATCH0 + 3;
+pub(super) const T4: u32 = SCRATCH0 + 4;
+/// Holds the block's runtime entry PC (the image PC at entry), set by
+/// [`load_entry_pc`]. PC-derived values are computed as `PC0 + delta`
+/// ([`gen_rel_pc`]) so the block is position-independent: the same physical block
+/// runs correctly at any virtual address it's mapped to.
+pub(super) const PC0: u32 = SCRATCH0 + 5;
+/// Number of scratch i64 locals the block function declares.
+pub(crate) const SCRATCH_I64: u32 = 6;
+/// Number of scratch i32 locals: the computed linear address [`ADDR`] and the
+/// self-loop iteration counter [`PASSES`].
+pub(crate) const SCRATCH_I32: u32 = 2;
+/// The i32 scratch local holding a computed linear memory address. First i32
+/// local, following the i64 scratch locals.
+pub(super) const ADDR: u32 = SCRATCH0 + SCRATCH_I64;
+/// The i32 local counting iterations of an internally-emitted self-loop (see
+/// `emit_self_loop`). Zero-initialised like all wasm locals.
+pub(super) const PASSES: u32 = SCRATCH0 + SCRATCH_I64 + 1;
 
 // NZCV bit positions in the packed word.
 pub(super) const N_BIT: i64 = 31;
@@ -75,7 +91,41 @@ pub(super) fn store_local(f: &mut Function, rd: u8, sf: bool, sp: bool, tmp: u32
     }
 }
 
-/// Store `pc + 4` into the image PC.
-pub(super) fn advance_pc(f: &mut Function, pc: u64) {
-    emit!(f, I::LocalGet(0), I::I64Const(pc.wrapping_add(4) as i64), I::I64Store(at(offsets::PC)));
+/// Store a constant instruction count into the block's `jit_count` slot, so the
+/// organizer learns how many instructions the call retired. Used by
+/// straight-line blocks (each call executes the block exactly once).
+pub(super) fn store_count_const(f: &mut Function, count: u64) {
+    emit!(f, I::LocalGet(0), I::I64Const(count as i64), I::I64Store(at(JIT_COUNT_OFFSET)));
+}
+
+/// Store `PASSES * len` into the block's `jit_count` slot — the instruction count
+/// for a self-loop that ran `PASSES` iterations of a `len`-instruction body.
+pub(super) fn store_count_loop(f: &mut Function, len: u64) {
+    emit!(
+        f,
+        I::LocalGet(0),
+        I::LocalGet(PASSES),
+        I::I64ExtendI32U,
+        I::I64Const(len as i64),
+        I::I64Mul,
+        I::I64Store(at(JIT_COUNT_OFFSET))
+    );
+}
+
+/// Load the runtime entry PC (image PC at block entry) into [`PC0`]. Emitted once
+/// at the top of every block; the base for all position-independent PC math.
+pub(super) fn load_entry_pc(f: &mut Function) {
+    emit!(f, I::LocalGet(0), I::I64Load(at(offsets::PC)), I::LocalSet(PC0));
+}
+
+/// Push a position-independent guest address: `PC0 + (abs - entry_pc)`. `abs` is
+/// the compile-time virtual address; the runtime entry PC ([`PC0`]) supplies the
+/// actual base, so the same physical block is correct at whatever VA it runs at.
+pub(super) fn gen_rel_pc(f: &mut Function, abs: u64, entry_pc: u64) {
+    emit!(
+        f,
+        I::LocalGet(PC0),
+        I::I64Const(abs.wrapping_sub(entry_pc) as i64),
+        I::I64Add
+    );
 }
