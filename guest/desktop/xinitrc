@@ -1,7 +1,0 @@
-#!/bin/sh
-# X session: a coloured root window, the JWM window manager (gives a panel +
-# draggable window borders), and a terminal. Move the mouse, drag the window,
-# type in xterm — that exercises virtio-gpu redraws + virtio-input end to end.
-xsetroot -solid steelblue
-jwm &
-exec xterm -geometry 90x28+60+60

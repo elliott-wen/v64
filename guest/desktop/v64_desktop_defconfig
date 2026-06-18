@@ -1,0 +1,42 @@
+# Buildroot defconfig for a small aarch64 X11 desktop rootfs for the v64
+# emulator. Builds ONLY a rootfs (musl) — no kernel/bootloader; we reuse the
+# existing guest/prebuilt/Image-tiny. Output: output/images/rootfs.ext2 (ext4).
+#
+#   cp this to buildroot/configs/v64_desktop_defconfig
+#   cd buildroot && make v64_desktop_defconfig && make
+# (or just run guest/desktop/build.sh, which clones Buildroot and does this.)
+
+# Target: generic ARMv8-A, musl libc, C++ (Xorg pulls some C++).
+BR2_aarch64=y
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+
+# System: serial getty on ttyAMA0, our overlay drops in the X autostart + config.
+BR2_TARGET_GENERIC_HOSTNAME="v64"
+BR2_TARGET_GENERIC_ISSUE="v64 desktop"
+BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
+BR2_ROOTFS_OVERLAY="../guest/desktop/overlay"
+
+# eudev so Xorg/libinput autodetect the virtio keyboard + mouse.
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
+BR2_PACKAGE_EUDEV=y
+
+# Root filesystem: ext4 image (mounted as /dev/vda by the emulator).
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="600M"
+# BR2_TARGET_ROOTFS_TAR is not set
+
+# X.org: server + framebuffer video driver (/dev/fb0) + libinput, xinit to start
+# a session, a tiny window manager (matchbox), a terminal, and the base fonts.
+BR2_PACKAGE_XORG7=y
+BR2_PACKAGE_XSERVER_XORG_SERVER=y
+BR2_PACKAGE_XDRIVER_XF86_VIDEO_FBDEV=y
+BR2_PACKAGE_XDRIVER_XF86_INPUT_LIBINPUT=y
+BR2_PACKAGE_XAPP_XINIT=y
+BR2_PACKAGE_XAPP_XSETROOT=y
+BR2_PACKAGE_XAPP_XTERM=y
+BR2_PACKAGE_MATCHBOX=y
+BR2_PACKAGE_XFONT_FONT_MISC_MISC=y
+BR2_PACKAGE_XFONT_FONT_CURSOR_MISC=y
+BR2_PACKAGE_XFONT_FONT_ALIAS=y

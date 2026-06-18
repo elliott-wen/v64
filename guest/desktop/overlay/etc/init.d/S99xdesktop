@@ -1,0 +1,15 @@
+#!/bin/sh
+# Start X (matchbox + xterm) at boot, on the framebuffer/VT. Buildroot's busybox
+# init runs the S?? scripts from rcS with "start".
+case "$1" in
+  start)
+    echo "v64: starting X desktop on /dev/fb0"
+    mkdir -p /run
+    HOME=/root XDG_RUNTIME_DIR=/run startx -- vt1 -nolisten tcp >/var/log/x.log 2>&1 &
+    ;;
+  stop)
+    ;;
+  *)
+    echo "usage: $0 {start|stop}"
+    ;;
+esac
