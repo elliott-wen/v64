@@ -371,7 +371,9 @@ fn rand_dp(rng: &mut Rng) -> u32 {
     let w = rng.below(2) == 0; // exercise the 32-bit width too
     // Pick the X or W base for a two-register op.
     let two = |xb: u32, wb: u32| (if w { wb } else { xb }) | (rm << 16) | (rn << 5) | rd;
-    match rng.below(21) {
+    match rng.below(23) {
+        20 => 0x9B40_7C00 | (rm << 16) | (rn << 5) | rd, // SMULH (64-bit only)
+        21 => 0x9BC0_7C00 | (rm << 16) | (rn << 5) | rd, // UMULH (64-bit only)
         0 => two(0x8B00_0000, 0x0B00_0000),  // ADD
         1 => two(0xCB00_0000, 0x4B00_0000),  // SUB
         2 => two(0x8A00_0000, 0x0A00_0000),  // AND

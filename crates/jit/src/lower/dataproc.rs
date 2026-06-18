@@ -265,9 +265,45 @@ pub(super) fn data_proc_3src(f: &mut Function, sf: bool, op31: u8, o0: bool, rm:
             emit!(f, I::LocalSet(T0));
             store_local(f, rd, true, false, T0);
         }
-        _ => return false, // SMULH/UMULH
+        0b010 | 0b110 => {
+            // SMULH (010) / UMULH (110): the high 64 bits of the 128-bit product.
+            // WASM has no i128, so build it from 32-bit half-products.
+            push_operand(f, rn, true, false);
+            emit!(f, I::LocalSet(T0)); // a
+            push_operand(f, rm, true, false);
+            emit!(f, I::LocalSet(T1)); // b
+            umulh(f); // unsigned high 64 -> T2
+            if op31 == 0b010 {
+                // Signed correction: high_s = high_u - (a<0 ? b : 0) - (b<0 ? a : 0).
+                emit!(f, I::LocalGet(T2));
+                emit!(f, I::LocalGet(T0), I::I64Const(63), I::I64ShrS, I::LocalGet(T1), I::I64And);
+                emit!(f, I::LocalGet(T1), I::I64Const(63), I::I64ShrS, I::LocalGet(T0), I::I64And);
+                emit!(f, I::I64Add, I::I64Sub, I::LocalSet(T2));
+            }
+            store_local(f, rd, true, false, T2);
+        }
+        _ => return false, // unallocated
     }
     true
+}
+
+/// Unsigned high 64 bits of `T0 * T1` (a full 128-bit product) into `T2`, via
+/// 32-bit half-products. Clobbers T2, T3, T4. `m` masks the low 32 bits.
+fn umulh(f: &mut Function) {
+    let m = W_MASK;
+    // T2 = aL*bH, T3 = aH*bL, T4 = aH*bH.
+    emit!(f, I::LocalGet(T0), I::I64Const(m), I::I64And, I::LocalGet(T1), I::I64Const(32), I::I64ShrU, I::I64Mul, I::LocalSet(T2));
+    emit!(f, I::LocalGet(T0), I::I64Const(32), I::I64ShrU, I::LocalGet(T1), I::I64Const(m), I::I64And, I::I64Mul, I::LocalSet(T3));
+    emit!(f, I::LocalGet(T0), I::I64Const(32), I::I64ShrU, I::LocalGet(T1), I::I64Const(32), I::I64ShrU, I::I64Mul, I::LocalSet(T4));
+    // high = hh + (lh>>32) + (hl>>32) + ((((aL*bL)>>32) + (lh&m) + (hl&m)) >> 32)
+    emit!(f, I::LocalGet(T4));
+    emit!(f, I::LocalGet(T2), I::I64Const(32), I::I64ShrU, I::I64Add);
+    emit!(f, I::LocalGet(T3), I::I64Const(32), I::I64ShrU, I::I64Add);
+    // mid = (aL*bL)>>32 + (lh&m) + (hl&m)
+    emit!(f, I::LocalGet(T0), I::I64Const(m), I::I64And, I::LocalGet(T1), I::I64Const(m), I::I64And, I::I64Mul, I::I64Const(32), I::I64ShrU);
+    emit!(f, I::LocalGet(T2), I::I64Const(m), I::I64And, I::I64Add);
+    emit!(f, I::LocalGet(T3), I::I64Const(m), I::I64And, I::I64Add);
+    emit!(f, I::I64Const(32), I::I64ShrU, I::I64Add, I::LocalSet(T2));
 }
 
 /// Push the low 32 bits of `rn`, sign- or zero-extended to 64 bits.

@@ -67,10 +67,10 @@ fn is_inline_dp2(opcode: u8) -> bool {
 }
 
 /// DataProc (3-source) `op31` values [`crate::lower::dataproc::data_proc_3src`]
-/// emits: MADD/MSUB (`000`) and the widening S/UMADDL/S/UMSUBL (`001`/`101`).
-/// SMULH/UMULH (`010`/`110`) need a 128-bit product and fall back.
+/// emits: MADD/MSUB (`000`), the widening S/UMADDL/S/UMSUBL (`001`/`101`), and
+/// SMULH/UMULH (`010`/`110`, built from 32-bit half-products).
 fn is_inline_dp3(op31: u8) -> bool {
-    matches!(op31, 0b000 | 0b001 | 0b101)
+    matches!(op31, 0b000 | 0b001 | 0b010 | 0b101 | 0b110)
 }
 
 /// True for a branch the emitter lowers inline as a block terminator.
