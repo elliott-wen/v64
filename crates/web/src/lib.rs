@@ -228,3 +228,166 @@ impl Emulator {
         self.board.machine.jit_region_blocks()
     }
 }
+
+/// JIT ↔ interpreter differential crosscheck, run in node.
+///
+/// The JIT only executes under a `WebAssembly` host, so this is the third leg of
+/// the trust chain: Unicorn validates the interpreter (the native fuzz sweep),
+/// and this validates the JIT *against that interpreter*. Each kernel is a tight
+/// loop run two ways through the same `Machine` — once interpreted, once
+/// JIT-organized — and the full architectural state must come out identical.
+/// Loops iterate past `JIT_HOTNESS` (256) so the block actually compiles and the
+/// hot, compiled path is what we compare (asserted via `jit_insns() > 0`).
+///
+/// Run with:
+/// ```text
+/// CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+///   cargo test -p aarch64-web --target wasm32-unknown-unknown
+/// ```
+#[cfg(test)]
+mod jit_crosscheck {
+    use super::{jit_set_memory, jit_set_table, WasmClock, WasmRunner};
+    use aarch64_platform::{Board, Machine, DEFAULT_FREQ_HZ, RAM_BASE};
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_node);
+
+    // --- A handful of instruction encoders (OR-composed so the field math is
+    // self-evidently correct), covering the lowered families under test. ---
+    fn add_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+        0x8B00_0000 | (rm << 16) | (rn << 5) | rd
+    }
+    fn eor_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+        0xCA00_0000 | (rm << 16) | (rn << 5) | rd
+    }
+    fn orr_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+        0xAA00_0000 | (rm << 16) | (rn << 5) | rd
+    }
+    fn subs_imm(rd: u32, rn: u32, imm12: u32) -> u32 {
+        0xF100_0000 | (imm12 << 10) | (rn << 5) | rd
+    }
+    fn madd(rd: u32, rn: u32, rm: u32, ra: u32) -> u32 {
+        0x9B00_0000 | (rm << 16) | (ra << 10) | (rn << 5) | rd
+    }
+    fn udiv(rd: u32, rn: u32, rm: u32) -> u32 {
+        0x9AC0_0800 | (rm << 16) | (rn << 5) | rd
+    }
+    fn csel(rd: u32, rn: u32, rm: u32, cond: u32) -> u32 {
+        0x9A80_0000 | (rm << 16) | (cond << 12) | (rn << 5) | rd
+    }
+    /// ADD Vd.4S, Vn.4S, Vm.4S (SIMD three-same, 32-bit lanes, full 128-bit).
+    fn add_v4s(rd: u32, rn: u32, rm: u32) -> u32 {
+        0x4EA0_8400 | (rm << 16) | (rn << 5) | rd
+    }
+    /// CBNZ Xt, #off (off is a signed byte displacement from this instruction).
+    fn cbnz(rt: u32, off: i32) -> u32 {
+        0xB500_0000 | ((((off >> 2) as u32) & 0x7_ffff) << 5) | rt
+    }
+    /// B.cond #off (off is a signed byte displacement from this instruction).
+    fn bcond(cond: u32, off: i32) -> u32 {
+        0x5400_0000 | ((((off >> 2) as u32) & 0x7_ffff) << 5) | cond
+    }
+
+    fn image(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    /// A bare machine: code at `RAM_BASE`, PC there, MMU off (EL1h), registers
+    /// seeded. Two of these built identically are the two sides of a crosscheck.
+    fn machine(words: &[u32], xs: &[(usize, u64)], vs: &[(usize, u128)]) -> Board {
+        let clock = Box::new(WasmClock { freq: DEFAULT_FREQ_HZ });
+        let mut board = Board::with_ram_and_clock(8 << 20, clock);
+        board.machine.bus.ram_mut().write(RAM_BASE, &image(words));
+        board.machine.cpu.pc = RAM_BASE;
+        for &(i, v) in xs {
+            board.machine.cpu.x[i] = v;
+        }
+        for &(i, v) in vs {
+            board.machine.cpu.v[i] = v;
+        }
+        board
+    }
+
+    fn assert_arch_state_eq(interp: &Machine, jit: &Machine) {
+        assert_eq!(jit.cpu.x, interp.cpu.x, "X registers");
+        assert_eq!(jit.cpu.sp, interp.cpu.sp, "SP");
+        assert_eq!(jit.cpu.pc, interp.cpu.pc, "PC");
+        assert_eq!(jit.cpu.flags.to_nzcv(), interp.cpu.flags.to_nzcv(), "NZCV");
+        assert_eq!(jit.cpu.v, interp.cpu.v, "V registers");
+        assert_eq!(jit.cpu.fpcr, interp.cpu.fpcr, "FPCR");
+    }
+
+    /// Run `words` to `exit_off` two ways and assert identical architectural
+    /// state. `until` (a PC, not a count) makes both stop at the same point
+    /// regardless of block granularity. A 2M-instruction cap turns a runaway
+    /// kernel into a loud failure rather than a hang.
+    fn crosscheck(words: &[u32], xs: &[(usize, u64)], vs: &[(usize, u128)], exit_off: u64) {
+        const CAP: usize = 2_000_000;
+        let until = RAM_BASE + exit_off;
+
+        let mut interp = machine(words, xs, vs);
+        interp.machine.run(until, CAP);
+
+        let mut jit = machine(words, xs, vs);
+        jit_set_memory(wasm_bindgen::memory());
+        jit_set_table(wasm_bindgen::function_table());
+        let mut runner = WasmRunner;
+        jit.machine.run_jit_browser(until, CAP, &mut runner);
+
+        assert_eq!(interp.machine.cpu.pc, until, "interpreter reached exit");
+        assert_eq!(jit.machine.cpu.pc, until, "JIT reached exit");
+        assert!(jit.machine.jit_insns() > 0, "a hot block actually compiled and ran");
+        assert_arch_state_eq(&interp.machine, &jit.machine);
+    }
+
+    // EOR/ORR pattern. Both x0 (loop counter, sets flags via SUBS) and the
+    // accumulators must match — exercises ADD/EOR/ORR shifted-reg, SUBS imm, CBNZ.
+    #[wasm_bindgen_test]
+    fn arith_logical_flags() {
+        let code = [
+            add_reg(1, 1, 2),    // x1 += x2
+            eor_reg(3, 1, 2),    // x3 = x1 ^ x2
+            orr_reg(4, 4, 3),    // x4 |= x3
+            subs_imm(0, 0, 1),   // x0--, set NZCV
+            cbnz(0, -16),        // loop while x0 != 0
+        ];
+        crosscheck(&code, &[(0, 1000), (1, 0), (2, 0x0123_4567_89AB_CDEF), (3, 0), (4, 0)], &[], 20);
+    }
+
+    // MADD / UDIV / CSEL — the multiply, divide, and conditional-select lowering.
+    #[wasm_bindgen_test]
+    fn mul_div_csel() {
+        let code = [
+            madd(1, 1, 2, 3),    // x1 = x1*x2 + x3
+            udiv(5, 1, 7),       // x5 = x1 / x7
+            subs_imm(0, 0, 1),   // x0--, set flags
+            csel(8, 1, 5, 0),    // x8 = (Z) ? x1 : x5   (cond EQ)
+            cbnz(0, -16),
+        ];
+        crosscheck(&code, &[(0, 500), (1, 1), (2, 3), (3, 7), (5, 0), (7, 9), (8, 0)], &[], 20);
+    }
+
+    // B.cond terminator (distinct from CBNZ): loop on NE.
+    #[wasm_bindgen_test]
+    fn bcond_loop() {
+        let code = [
+            add_reg(1, 1, 2),    // x1 += x2
+            subs_imm(0, 0, 1),   // x0--, set flags
+            bcond(0b0001, -8),   // B.NE loop
+        ];
+        crosscheck(&code, &[(0, 800), (1, 0), (2, 5)], &[], 12);
+    }
+
+    // Inline SIMD: vector ADD on 4×32-bit lanes accumulated across the loop.
+    #[wasm_bindgen_test]
+    fn simd_vector_add() {
+        let code = [
+            add_v4s(0, 0, 1),    // v0.4s += v1.4s
+            subs_imm(0, 0, 1),   // x0--, set flags
+            cbnz(0, -8),
+        ];
+        // v1 lanes = [4, 3, 2, 1] (little-endian 32-bit lanes).
+        let v1 = 0x0000_0001_0000_0002_0000_0003_0000_0004u128;
+        crosscheck(&code, &[(0, 600)], &[(0, 0), (1, v1)], 12);
+    }
+}

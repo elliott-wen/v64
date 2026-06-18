@@ -19,3 +19,8 @@ aarch64-interp.workspace = true
 aarch64-platform = { path = "../platform", default-features = false, features = ["jit"] }
 # Pinned to the installed `wasm-bindgen-cli` version (the two must match exactly).
 wasm-bindgen = "=0.2.125"
+
+[dev-dependencies]
+# JIT-vs-interpreter differential crosscheck runs in node (the JIT only executes
+# under a WebAssembly host). Version tracks `wasm-bindgen` above.
+wasm-bindgen-test = "0.3"
