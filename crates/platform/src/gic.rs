@@ -285,7 +285,25 @@ impl MmioDevice for GicDist {
                     }
                 }
             }
-            _ => {} // TYPER/IIDR (RO), ITARGETSR (fixed), ICFGR, SGIR: ignored
+            // GICD_SGIR: send a software-generated interrupt (IPI). This is the
+            // single core, so the only possible target is CPU0. TargetListFilter
+            // [25:24]: 0b00 routes by the CPUTargetList [23:16] bitmask, 0b01 is
+            // all-but-self (no other core here -> nothing to deliver), 0b10 is
+            // "self" (== CPU0). SGIs (IDs 0..15) are always enabled in GICv2, so
+            // force the enable bit when delivering.
+            0xF00 => {
+                let sgi = (val & 0xf) as usize;
+                let to_cpu0 = match (val >> 24) & 0x3 {
+                    0b00 => (val >> 16) & 0x1 != 0, // CPU0 in the target list
+                    0b10 => true,                   // requester only == CPU0
+                    _ => false,                     // all-but-self / reserved
+                };
+                if to_cpu0 {
+                    g.enabled[sgi] = true;
+                    g.pending[sgi] = true;
+                }
+            }
+            _ => {} // TYPER/IIDR (RO), ITARGETSR (fixed), ICFGR: ignored
         }
         // A guest write may have changed enable/pending/priority; refresh the
         // cache. (Cheap: a write is rare relative to instruction count.)

@@ -195,6 +195,7 @@ impl Emulator {
         self.kbd = Some(self.board.attach_input(InputKind::Keyboard));
         self.mouse = Some(self.board.attach_input(InputKind::Mouse));
         self.gpu = Some(self.board.attach_gpu(1024, 768));
+        self.board.attach_rng();
         let initrd = (!initrd.is_empty()).then_some(initrd);
         self.board.boot_image(image, initrd, bootargs);
     }
@@ -208,6 +209,7 @@ impl Emulator {
         self.mouse = Some(self.board.attach_input(InputKind::Mouse));
         self.gpu = Some(self.board.attach_gpu(1024, 768));
         self.board.attach_disk(disk.to_vec());
+        self.board.attach_rng();
         self.board.boot_image(image, None, bootargs);
     }
 

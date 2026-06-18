@@ -110,7 +110,8 @@ fn main() -> ExitCode {
     let mouse = board.attach_input(InputKind::Mouse);
     let (gw, gh) = (GPU_WIDTH, GPU_HEIGHT);
     let gpu = board.attach_gpu(gw, gh);
-    eprintln!("v64: virtio devices: keyboard, mouse, gpu {gw}x{gh}");
+    board.attach_rng();
+    eprintln!("v64: virtio devices: keyboard, mouse, gpu {gw}x{gh}, rng");
 
     let bootargs = append.as_deref().unwrap_or(BOOTARGS);
     let layout = board.boot_image(&image, initrd.as_deref(), bootargs);

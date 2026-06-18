@@ -145,6 +145,17 @@ impl Board {
         blk
     }
 
+    /// Attach a virtio-rng (entropy) device. Maps its MMIO window, registers it
+    /// for DMA polling, and adds its FDT node. The guest uses it to seed its
+    /// CRNG early, silencing the "uninitialized urandom read" boot warnings.
+    pub fn attach_rng(&mut self) -> crate::VirtioRng {
+        let (base, irq) = self.next_virtio_slot();
+        let dev = crate::VirtioRng::new(self.machine.gic.clone(), irq);
+        self.machine.bus.map(base, VIRTIO_STRIDE, Box::new(dev.device()));
+        self.machine.add_dma(Box::new(dev.clone()));
+        dev
+    }
+
     /// Attach a virtio-input device (keyboard or mouse). The returned handle's
     /// `key`/`motion` methods inject host input events to the guest.
     pub fn attach_input(&mut self, kind: crate::InputKind) -> crate::VirtioInput {

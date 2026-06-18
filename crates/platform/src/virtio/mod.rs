@@ -6,7 +6,9 @@ mod blk;
 mod gpu;
 mod input;
 mod queue;
+mod rng;
 
 pub use blk::{VirtioBlk, VirtioBlkMmio};
 pub use gpu::{VirtioGpu, VirtioGpuMmio};
 pub use input::{InputKind, VirtioInput, VirtioInputMmio};
+pub use rng::{VirtioRng, VirtioRngMmio};

@@ -99,3 +99,34 @@ fn eret_returns_to_interrupted_instruction() {
     m.step();
     assert_eq!(m.cpu.pc, MAIN + 4);
 }
+
+/// GICD_SGIR offset within the distributor.
+const GICD_SGIR: u64 = 0xF00;
+
+#[test]
+fn sgir_self_delivers_software_interrupt() {
+    let mut m = setup();
+    write_insn(&mut m.bus, MAIN, B_SELF); // main spins
+    write_insn(&mut m.bus, IRQ_VECTOR, B_SELF); // handler spins
+    // TargetListFilter = 0b10 (requester == CPU0), SGI ID 1. SGIs are always
+    // enabled, so this alone must make the SGI pending and deliverable.
+    m.bus.write_u32(GICD + GICD_SGIR, (0b10 << 24) | 1);
+
+    m.step();
+
+    assert_eq!(m.cpu.pc, IRQ_VECTOR, "SGI vectored to the IRQ slot");
+    assert_eq!(m.bus.read_u32(GICC + 0x0C), 1, "GICC_IAR returns the SGI ID");
+}
+
+#[test]
+fn sgir_all_but_self_is_dropped_on_single_core() {
+    let mut m = setup();
+    write_insn(&mut m.bus, MAIN, B_SELF);
+    // TargetListFilter = 0b01 (all CPUs but the requester); there is no other
+    // core, so nothing is delivered and main keeps spinning.
+    m.bus.write_u32(GICD + GICD_SGIR, (0b01 << 24) | 1);
+
+    m.step();
+
+    assert_eq!(m.cpu.pc, MAIN, "no other core to target; SGI dropped");
+}

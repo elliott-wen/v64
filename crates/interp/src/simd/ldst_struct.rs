@@ -51,10 +51,21 @@ pub(crate) fn multi<M: GuestMem>(
                 let off = e * (1u32 << size);
                 if is_load {
                     let val = mem_access::read(cpu, mem, addr, size);
+                    // A faulting element must NOT update its register, and the
+                    // instruction must stop here so it's cleanly restartable
+                    // (no post-index writeback below) — otherwise demand paging
+                    // re-runs it with an already-advanced base. FAR is the first
+                    // faulting address.
+                    if cpu.pending_abort.is_some() {
+                        return None;
+                    }
                     set_elem(cpu, tt, off, size, val);
                 } else {
                     let val = get_elem(cpu, tt, off, size);
                     mem_access::write(cpu, mem, addr, size, val);
+                    if cpu.pending_abort.is_some() {
+                        return None;
+                    }
                 }
                 addr = addr.wrapping_add(ebytes);
             }
@@ -103,15 +114,24 @@ pub(crate) fn single<M: GuestMem>(
     for _ in 0..selem {
         if replicate {
             let val = mem_access::read(cpu, mem, addr, size);
+            if cpu.pending_abort.is_some() {
+                return None; // faulted: stop, no writeback, cleanly restartable
+            }
             cpu.v[tt as usize] = broadcast(val, size, q);
         } else if is_load {
             let off = u32::from(index) * (1u32 << size);
             let val = mem_access::read(cpu, mem, addr, size);
+            if cpu.pending_abort.is_some() {
+                return None;
+            }
             set_elem(cpu, tt, off, size, val);
         } else {
             let off = u32::from(index) * (1u32 << size);
             let val = get_elem(cpu, tt, off, size);
             mem_access::write(cpu, mem, addr, size, val);
+            if cpu.pending_abort.is_some() {
+                return None;
+            }
         }
         addr = addr.wrapping_add(ebytes);
         tt = (tt + 1) % 32;

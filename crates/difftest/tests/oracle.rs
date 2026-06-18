@@ -232,6 +232,31 @@ fn matches_unicorn_sp_el0_roundtrip() {
 }
 
 #[test]
+fn matches_unicorn_daif_cross_form() {
+    // DAIF (3,3,4,2,1) has dedicated state shared with the immediate DAIFSet/Clr
+    // forms; the register forms must use it too. Clear DAIF (register form,
+    // init-independent), set the I bit via the immediate form, read it back.
+    let tv = TestVector::new(&[
+        0x01, 0x00, 0x80, 0xd2, // mov x1, #0
+        0x21, 0x42, 0x1b, 0xd5, // msr daif, x1
+        0xdf, 0x42, 0x03, 0xd5, // msr daifset, #2
+        0x20, 0x42, 0x3b, 0xd5, // mrs x0, daif
+    ]);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
+fn matches_unicorn_nzcv_msr() {
+    // NZCV (3,3,4,2,0) register form must reach the flags state.
+    let tv = TestVector::new(&[
+        0x02, 0x00, 0xbe, 0xd2, // mov x2, #0xf0000000
+        0x02, 0x42, 0x1b, 0xd5, // msr nzcv, x2
+        0x03, 0x42, 0x3b, 0xd5, // mrs x3, nzcv
+    ]);
+    assert_matches_oracle(&tv);
+}
+
+#[test]
 fn matches_unicorn_fmov_high_half() {
     // fmov x0, v3.d[1] : high 64 bits of V3 -> X0
     let mut tv = TestVector::new(&0x9eae_0060u32.to_le_bytes());

@@ -32,4 +32,5 @@ pub use machine::BlockRunner;
 pub use uart::{Uart, UartDevice};
 pub use virtio::{
     InputKind, VirtioBlk, VirtioBlkMmio, VirtioGpu, VirtioGpuMmio, VirtioInput, VirtioInputMmio,
+    VirtioRng, VirtioRngMmio,
 };

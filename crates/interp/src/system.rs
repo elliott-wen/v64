@@ -6,10 +6,23 @@
 //! system-mode work). Writable registers round-trip, which is what early
 //! differential tests exercise.
 
-use aarch64_cpu_state::CpuState;
+use aarch64_cpu_state::{CpuState, Flags};
 use aarch64_decoder::sysreg_key;
 
 use crate::exception::{key_sp_el0, key_sp_el1};
+
+// DAIF (S3_3_C4_C2_1) and NZCV (S3_3_C4_C2_0) are PSTATE fields with dedicated
+// `CpuState` storage (`daif` / `flags`), not plain map entries. The *immediate*
+// MSR forms (DAIFSet/DAIFClr) and exception entry/ERET already update those
+// fields; the *register* forms (`mrs x,daif` / `msr daif,x`, used by
+// `local_irq_save`/`local_irq_restore`) must hit the same state or the two
+// views desync and the IRQ-mask gate reads a stale value.
+fn key_daif() -> u32 {
+    sysreg_key(3, 3, 4, 2, 1)
+}
+fn key_nzcv() -> u32 {
+    sysreg_key(3, 3, 4, 2, 0)
+}
 
 // FPCR/FPSR live in dedicated CpuState fields (the FP executors read/update them
 // directly), so route their MRS/MSR there rather than to the generic map.
@@ -86,6 +99,10 @@ pub(crate) fn exec(cpu: &mut CpuState, read: bool, key: u32, rt: u8) -> Option<u
             cpu.fpcr
         } else if key == key_fpsr() {
             cpu.fpsr
+        } else if key == key_daif() {
+            u64::from(cpu.daif) << 6
+        } else if key == key_nzcv() {
+            cpu.flags.to_nzcv()
         } else if let Some(v) = read_xlate_reg(cpu, key) {
             v
         } else {
@@ -105,6 +122,10 @@ pub(crate) fn exec(cpu: &mut CpuState, read: bool, key: u32, rt: u8) -> Option<u
             cpu.fpcr = val;
         } else if key == key_fpsr() {
             cpu.fpsr = val;
+        } else if key == key_daif() {
+            cpu.daif = ((val >> 6) & 0xf) as u8;
+        } else if key == key_nzcv() {
+            cpu.flags = Flags::from_nzcv(val);
         } else if write_xlate_reg(cpu, key, val) {
             // Routed to a dedicated translation-control field; TLB flushed.
         } else {
