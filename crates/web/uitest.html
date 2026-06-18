@@ -1,0 +1,196 @@
+<!doctype html>
+<!--
+  uitest in the browser: boots the tiny arm64 Linux Image with the uitest
+  initramfs (virtio-gpu framebuffer + virtio-input keyboard/mouse) on the
+  wasm-compiled emulator, JIT-accelerated.
+
+  Build the web bindings first, then serve the repo root over HTTP:
+
+      crates/web/build.sh web
+      python3 -m http.server 8000        # from the repo root
+      # open http://localhost:8000/crates/web/uitest.html
+
+  (Must be served over HTTP — ES module + wasm fetch won't load from file://.)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>v64 — uitest (wasm)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #111; color: #ddd; font: 13px/1.4 ui-monospace, monospace; }
+  header { padding: 8px 12px; background: #1b1b1b; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  button { font: inherit; padding: 4px 12px; background: #2a6; color: #000; border: 0; border-radius: 4px; cursor: pointer; }
+  button:disabled { background: #444; color: #888; cursor: default; }
+  label { display: flex; gap: 5px; align-items: center; }
+  #stats { margin-left: auto; color: #8c8; white-space: pre; }
+  main { display: flex; gap: 10px; padding: 10px; align-items: flex-start; flex-wrap: wrap; }
+  #screen { background: #000; border: 1px solid #333; image-rendering: pixelated; width: 1024px; height: 768px; max-width: 100%; cursor: none; }
+  #console { flex: 1; min-width: 320px; height: 768px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+             background: #000; border: 1px solid #333; padding: 8px; margin: 0; color: #cfc; }
+  .hint { color: #888; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>v64 · uitest</h1>
+  <button id="start">Boot</button>
+  <label><input type="checkbox" id="jit" checked /> JIT</label>
+  <span class="hint">click screen to capture mouse · keys go to the guest · Esc(in guest) quits uitest</span>
+  <span id="stats"></span>
+</header>
+<main>
+  <canvas id="screen" width="1024" height="768"></canvas>
+  <pre id="console"></pre>
+</main>
+
+<script type="module">
+import init, { Emulator } from './pkg-web/aarch64_web.js';
+
+const KERNEL  = '../../guest/prebuilt/Image-tiny';
+const INITRD  = '../../guest/prebuilt/uitest.cpio.gz';
+const BOOTARGS = 'earlycon=pl011,0x9000000 console=ttyAMA0 rdinit=/init';
+const BATCH = 2_000_000;          // guest instructions per animation frame
+
+const startBtn = document.getElementById('start');
+const jitBox   = document.getElementById('jit');
+const statsEl  = document.getElementById('stats');
+const consoleEl = document.getElementById('console');
+const canvas   = document.getElementById('screen');
+const ctx2d    = canvas.getContext('2d');
+
+const dec = new TextDecoder('latin1');
+function log(s) {
+  const atBottom = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 4;
+  consoleEl.textContent += s;
+  if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+// --- KeyboardEvent.code -> Linux evdev keycode (enough to drive the UI) ---
+const KEYS = {
+  Escape:1, Digit1:2,Digit2:3,Digit3:4,Digit4:5,Digit5:6,Digit6:7,Digit7:8,Digit8:9,Digit9:10,Digit0:11,
+  Minus:12, Equal:13, Backspace:14, Tab:15,
+  KeyQ:16,KeyW:17,KeyE:18,KeyR:19,KeyT:20,KeyY:21,KeyU:22,KeyI:23,KeyO:24,KeyP:25,
+  BracketLeft:26, BracketRight:27, Enter:28, ControlLeft:29,
+  KeyA:30,KeyS:31,KeyD:32,KeyF:33,KeyG:34,KeyH:35,KeyJ:36,KeyK:37,KeyL:38, Semicolon:39, Quote:40, Backquote:41,
+  ShiftLeft:42, Backslash:43, KeyZ:44,KeyX:45,KeyC:46,KeyV:47,KeyB:48,KeyN:49,KeyM:50, Comma:51, Period:52, Slash:53,
+  ShiftRight:54, AltLeft:56, Space:57, CapsLock:58,
+  F1:59,F2:60,F3:61,F4:62,F5:63,F6:64,F7:65,F8:66,F9:67,F10:68,
+  ArrowUp:103, ArrowLeft:105, ArrowRight:106, ArrowDown:108, ControlRight:97, AltRight:100,
+};
+const BTN = { 0:0x110, 1:0x112, 2:0x111 }; // JS button -> BTN_LEFT/MIDDLE/RIGHT
+
+let emu = null;
+let running = false;
+let imageData = null;
+const t0Insns = { t: 0, n: 0 };
+
+async function fetchBytes(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch ${url}: ${r.status}`);
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+function drawFrame() {
+  const px = emu.take_frame();        // B8G8R8A8, empty if no new frame
+  if (px.length === 0) return;
+  const w = emu.fb_width(), h = emu.fb_height();
+  if (w === 0 || h === 0) return;
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h; imageData = null;
+  }
+  if (!imageData || imageData.width !== w || imageData.height !== h) {
+    imageData = ctx2d.createImageData(w, h);
+  }
+  const d = imageData.data;
+  // BGRA -> RGBA (swap B and R), force opaque alpha.
+  for (let i = 0; i < px.length; i += 4) {
+    d[i]   = px[i + 2];
+    d[i+1] = px[i + 1];
+    d[i+2] = px[i];
+    d[i+3] = 255;
+  }
+  ctx2d.putImageData(imageData, 0, 0);
+}
+
+function frame() {
+  if (!running) return;
+  const useJit = jitBox.checked;
+  const status = useJit ? emu.run_jit(BATCH) : emu.run(BATCH);
+
+  const u = emu.take_uart();
+  if (u.length) log(dec.decode(u));
+  drawFrame();
+
+  // Stats: total instructions + a rolling MIPS estimate.
+  const now = performance.now();
+  const total = Number(emu.total_insns());
+  if (t0Insns.t === 0) { t0Insns.t = now; t0Insns.n = total; }
+  const dt = (now - t0Insns.t) / 1000;
+  const mips = dt > 0.25 ? ((total - t0Insns.n) / 1e6 / dt) : 0;
+  if (dt > 0.5) { t0Insns.t = now; t0Insns.n = total; }
+  const cov = total ? (100 * Number(emu.jit_insns()) / total).toFixed(0) : '0';
+  statsEl.textContent =
+    `${(total/1e6).toFixed(1)}M insns  ${mips ? mips.toFixed(0)+' MIPS' : ''}  ${useJit ? 'JIT '+cov+'%' : 'interp'}`;
+
+  if (status === 1) { log('\n[guest powered off]\n'); stop(); return; }
+  requestAnimationFrame(frame);
+}
+
+function stop() {
+  running = false;
+  startBtn.disabled = false;
+  startBtn.textContent = 'Boot';
+}
+
+async function boot() {
+  startBtn.disabled = true;
+  startBtn.textContent = 'Booting…';
+  consoleEl.textContent = '';
+  log('[loading wasm + guest image…]\n');
+  try {
+    await init();
+    const [image, initrd] = await Promise.all([fetchBytes(KERNEL), fetchBytes(INITRD)]);
+    emu = new Emulator();
+    emu.boot(image, initrd, BOOTARGS);
+    log(`[booted: kernel ${image.length} B, initrd ${initrd.length} B]\n`);
+    running = true;
+    t0Insns.t = 0;
+    requestAnimationFrame(frame);
+  } catch (e) {
+    log(`\n[error: ${e.message || e}]\n`);
+    stop();
+  }
+}
+
+startBtn.addEventListener('click', boot);
+
+// --- input: forward keyboard/mouse to the guest while running ---
+addEventListener('keydown', (e) => {
+  if (!running) return;
+  const code = KEYS[e.code];
+  if (code !== undefined) { emu.key(code, true); e.preventDefault(); }
+});
+addEventListener('keyup', (e) => {
+  if (!running) return;
+  const code = KEYS[e.code];
+  if (code !== undefined) { emu.key(code, false); e.preventDefault(); }
+});
+
+canvas.addEventListener('click', () => { if (running) canvas.requestPointerLock(); });
+canvas.addEventListener('mousemove', (e) => {
+  if (running && document.pointerLockElement === canvas) emu.mouse_motion(e.movementX, e.movementY, 0);
+});
+canvas.addEventListener('mousedown', (e) => {
+  if (running && document.pointerLockElement === canvas) { emu.mouse_button(BTN[e.button] ?? 0x110, true); e.preventDefault(); }
+});
+addEventListener('mouseup', (e) => {
+  if (running && document.pointerLockElement === canvas) emu.mouse_button(BTN[e.button] ?? 0x110, false);
+});
+canvas.addEventListener('wheel', (e) => {
+  if (running && document.pointerLockElement === canvas) { emu.mouse_motion(0, 0, e.deltaY < 0 ? 1 : -1); e.preventDefault(); }
+}, { passive: false });
+</script>
+</body>
+</html>

@@ -8,7 +8,9 @@
 
 use aarch64_cpu_state::CpuState;
 use aarch64_interp::{run, Memory, StopReason};
-use aarch64_platform::{Board, BlockRunner, Clock, InputKind, DEFAULT_FREQ_HZ, RAM_BASE};
+use aarch64_platform::{
+    Board, BlockRunner, Clock, InputKind, VirtioGpu, VirtioInput, DEFAULT_FREQ_HZ, RAM_BASE,
+};
 use wasm_bindgen::prelude::*;
 
 /// Guest base address the code blob is loaded at (for [`run_code`]).
@@ -161,6 +163,13 @@ fn status_code(stop: StopReason) -> u32 {
 #[wasm_bindgen]
 pub struct Emulator {
     board: Board,
+    // Device handles retained so the page can read the framebuffer and inject
+    // input (the keyboard and mouse virtio-input devices, and the GPU scanout).
+    gpu: Option<VirtioGpu>,
+    kbd: Option<VirtioInput>,
+    mouse: Option<VirtioInput>,
+    fb_w: u32,
+    fb_h: u32,
 }
 
 #[wasm_bindgen]
@@ -168,17 +177,70 @@ impl Emulator {
     /// Build an emulator with a JS-backed timer clock.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Emulator {
-        Emulator { board: Board::with_clock(Box::new(WasmClock { freq: DEFAULT_FREQ_HZ })) }
+        Emulator {
+            board: Board::with_clock(Box::new(WasmClock { freq: DEFAULT_FREQ_HZ })),
+            gpu: None,
+            kbd: None,
+            mouse: None,
+            fb_w: 0,
+            fb_h: 0,
+        }
     }
 
     /// Attach the standard virtio devices and boot `image` (a Linux `Image`) with
     /// an optional `initrd` (empty = none) and the `bootargs` kernel command line.
+    /// The keyboard/mouse/GPU handles are kept for [`key`](Self::key) /
+    /// [`mouse_motion`](Self::mouse_motion) / [`take_frame`](Self::take_frame).
     pub fn boot(&mut self, image: &[u8], initrd: &[u8], bootargs: &str) {
-        self.board.attach_input(InputKind::Keyboard);
-        self.board.attach_input(InputKind::Mouse);
-        self.board.attach_gpu(1024, 768);
+        self.kbd = Some(self.board.attach_input(InputKind::Keyboard));
+        self.mouse = Some(self.board.attach_input(InputKind::Mouse));
+        self.gpu = Some(self.board.attach_gpu(1024, 768));
         let initrd = (!initrd.is_empty()).then_some(initrd);
         self.board.boot_image(image, initrd, bootargs);
+    }
+
+    /// The latest virtio-gpu scanout as B8G8R8A8 bytes, or an empty buffer if the
+    /// guest hasn't drawn a new frame since the last call. On a new frame the
+    /// dimensions are cached for [`fb_width`](Self::fb_width)/[`fb_height`](Self::fb_height).
+    pub fn take_frame(&mut self) -> Vec<u8> {
+        if let Some(gpu) = &self.gpu {
+            if let Some((w, h, px)) = gpu.take_frame() {
+                self.fb_w = w;
+                self.fb_h = h;
+                return px;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Width/height of the most recent frame from [`take_frame`](Self::take_frame).
+    pub fn fb_width(&self) -> u32 {
+        self.fb_w
+    }
+    pub fn fb_height(&self) -> u32 {
+        self.fb_h
+    }
+
+    /// Inject a guest keyboard event: `code` is a Linux evdev keycode (KEY_*),
+    /// `down` is press vs release.
+    pub fn key(&self, code: u16, down: bool) {
+        if let Some(kbd) = &self.kbd {
+            kbd.key(code, down);
+        }
+    }
+
+    /// Inject relative pointer motion (and/or `wheel` ticks) into the mouse.
+    pub fn mouse_motion(&self, dx: i32, dy: i32, wheel: i32) {
+        if let Some(mouse) = &self.mouse {
+            mouse.motion(dx, dy, wheel);
+        }
+    }
+
+    /// Inject a mouse button event: `code` is a Linux `BTN_*` code.
+    pub fn mouse_button(&self, code: u16, down: bool) {
+        if let Some(mouse) = &self.mouse {
+            mouse.key(code, down);
+        }
     }
 
     /// Run up to `budget` guest instructions (interpreter only). Returns a status

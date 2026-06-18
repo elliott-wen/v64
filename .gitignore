@@ -2,8 +2,9 @@
 /target
 **/target
 
-# wasm-bindgen generated bindings
+# wasm-bindgen generated bindings (node pkg/, browser pkg-web/)
 /crates/web/pkg
+/crates/web/pkg-web
 
 # Backup / editor files
 *.swp
