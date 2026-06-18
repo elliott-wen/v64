@@ -46,8 +46,38 @@ pub(crate) fn is_inline_fp(insn: &Insn) -> bool {
         Insn::FpCvtInt { ftype, opcode, .. } => {
             *ftype <= 1 && matches!(opcode, 0b000 | 0b001 | 0b010 | 0b011 | 0b110 | 0b111)
         }
+        // Fused multiply-add: see dp3 — emitted as mul+add (double-rounded), an
+        // accepted approximation since wasm has no FMA.
+        Insn::FpDataProc3 { ftype, .. } => *ftype <= 1,
         _ => false,
     }
+}
+
+/// FpDataProc3 — FMADD/FMSUB/FNMADD/FNMSUB. The architecture fuses the
+/// multiply-add (one rounding); wasm has no FMA, so this emits `mul` then `add`
+/// (two roundings). The result therefore differs from the interpreter in the
+/// last bit for a small fraction of inputs — a deliberate, accepted
+/// approximation (so the fused ops are excluded from the result crosscheck).
+/// `o1` negates Rn and Ra; `o0` negates the product (so Rn is negated iff o1^o0,
+/// Ra iff o1).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dp3(f: &mut Function, ftype: u8, o1: bool, o0: bool, rm: u8, ra: u8, rn: u8, rd: u8) {
+    let single = ftype == 0;
+    let neg = if single { I::F32Neg } else { I::F64Neg };
+    let mul = if single { I::F32Mul } else { I::F64Mul };
+    let add = if single { I::F32Add } else { I::F64Add };
+    read(f, single, rn);
+    if o1 ^ o0 {
+        emit!(f, neg);
+    }
+    read(f, single, rm);
+    emit!(f, mul);
+    read(f, single, ra);
+    if o1 {
+        emit!(f, neg);
+    }
+    emit!(f, add);
+    canon_write(f, single, rd);
 }
 
 /// FpCvtInt — integer<->FP conversions and FMOV between a GPR and an FP register.

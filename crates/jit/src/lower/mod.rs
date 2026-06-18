@@ -300,6 +300,7 @@ pub(crate) fn lower_sequential(f: &mut Function, insn: &Insn, pc: u64, entry_pc:
         Insn::FpCondCompare { ftype, rm, rn, cond, nzcv, .. } => fp::ccmp(f, ftype, rm, rn, cond, nzcv),
         Insn::FpCondSelect { ftype, cond, rm, rn, rd } => fp::csel(f, ftype, cond, rm, rn, rd),
         Insn::FpCvtInt { sf, ftype, rmode, opcode, rn, rd } => fp::cvt_int(f, sf, ftype, rmode, opcode, rn, rd),
+        Insn::FpDataProc3 { ftype, o1, o0, rm, ra, rn, rd } => fp::dp3(f, ftype, o1, o0, rm, ra, rn, rd),
         // LoadStore / LoadStorePair are routed to `lower_mem` / `lower_mem_pair`
         // by the emitter (they need the TLB fast path + bail), never here.
         Insn::SimdThreeSame { q, u, size, opcode, rm, rn, rd } => {

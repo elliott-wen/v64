@@ -858,8 +858,10 @@ fn random_lowering_sweep() {
             2 | 3 => (rand_simd(&mut rng), false),
             _ => (rand_fp(&mut rng), true),
         };
-        // Never stall the loop on a word our own decoder rejects.
-        if matches!(decode(w), Insn::Unsupported { .. }) {
+        // Skip words our decoder rejects (never stall the loop), and the fused
+        // multiply-adds: the JIT emits those as mul+add (no wasm FMA), so they
+        // double-round and are deliberately *not* bit-exact — see lower::fp::dp3.
+        if matches!(decode(w), Insn::Unsupported { .. } | Insn::FpDataProc3 { .. }) {
             continue;
         }
         // [W ; subs x0,#1 ; cbnz x0] — W over x1..x15 / v0..v15 can't touch x0.
