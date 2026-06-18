@@ -52,6 +52,10 @@ pub struct CpuState {
     /// flag-heavy hot path); the organizer bridges the two (one `u64`) around a
     /// block run. Stale outside that window — read [`flags`](Self::flags) instead.
     pub nzcv: u64,
+    /// SIMD/FP registers V0..V31 (128-bit; scalar FP uses the low bits). Placed
+    /// here so it sits at [`offsets::V`](crate::regs::offsets::V) (asserted), the
+    /// offset generated JIT blocks use for inline vector loads/stores.
+    pub v: [u128; 32],
     /// Instructions a compiled block reports executing, written by the block just
     /// before it returns (a block that loops internally runs many iterations per
     /// call, so the organizer can't infer the count from the static block length).
@@ -66,8 +70,6 @@ pub struct CpuState {
     /// block run. Offset exported as [`JIT_EXIT_OFFSET`](crate::JIT_EXIT_OFFSET).
     pub jit_exit: u64,
     pub flags: Flags,
-    /// SIMD/FP registers V0..V31 (128-bit). Scalar FP uses the low bits.
-    pub v: [u128; 32],
     /// Translation control registers, pulled out of [`Self::sysregs`] into hot
     /// fields because the MMU reads them on every translation (SCTLR on *every*
     /// instruction). A `BTreeMap` lookup here dominated the interpreter's
@@ -136,6 +138,7 @@ const _: () = {
     assert!(std::mem::offset_of!(CpuState, sp) == crate::regs::offsets::SP);
     assert!(std::mem::offset_of!(CpuState, pc) == crate::regs::offsets::PC);
     assert!(std::mem::offset_of!(CpuState, nzcv) == crate::regs::offsets::NZCV);
+    assert!(std::mem::offset_of!(CpuState, v) == crate::regs::offsets::V);
 };
 
 /// Byte offset of [`CpuState::jit_count`] within `CpuState`, for the JIT emitter

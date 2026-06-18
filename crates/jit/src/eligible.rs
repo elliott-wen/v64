@@ -58,10 +58,11 @@ pub fn is_inline_mem(insn: &Insn) -> bool {
 /// `LDTR`/`STTR`) end the block and run in the interpreter.
 #[must_use]
 pub fn is_inline_load_store(insn: &Insn) -> bool {
-    let Insn::LoadStore { vec: false, unpriv: false, size, addr, .. } = insn else {
+    let Insn::LoadStore { vec, unpriv: false, size, addr, .. } = insn else {
         return false;
     };
-    if *size > 3 {
+    // Integer widths are log2 0..=3 (1/2/4/8B); vector adds size 4 (the 128-bit Q).
+    if *size > if *vec { 4 } else { 3 } {
         return false;
     }
     match addr {
@@ -77,12 +78,11 @@ pub fn is_inline_load_store(insn: &Insn) -> bool {
     }
 }
 
-/// True for the integer `LDP`/`STP`/`LDPSW` pairs `lower::lower_mem_pair`
-/// inlines (all index modes: signed-offset, pre-, post-index). SIMD/FP pairs end
-/// the block and run in the interpreter.
+/// True for `LDP`/`STP`/`LDPSW` and the SIMD/FP pair forms `lower::lower_mem_pair`
+/// inlines — integer or vector, all index modes (signed-offset, pre-, post-index).
 #[must_use]
 pub fn is_inline_load_store_pair(insn: &Insn) -> bool {
-    matches!(insn, Insn::LoadStorePair { vec: false, .. })
+    matches!(insn, Insn::LoadStorePair { .. })
 }
 
 /// A compiled region: a set of basic blocks reachable from `entry` via

@@ -65,8 +65,8 @@ pub(crate) fn lower_mem(
     let Insn::LoadStore { size, is_load, signed, dst64, vec, unpriv, rt, addr } = *insn else {
         return false;
     };
-    if vec || unpriv || size > 3 {
-        return false; // only integer 1/2/4/8-byte forms inline
+    if unpriv || size > if vec { 4 } else { 3 } {
+        return false; // LDTR/STTR, or out-of-range width
     }
     let bytes = 1u64 << size;
 
@@ -195,10 +195,11 @@ pub(crate) fn lower_mem(
     );
     emit!(f, I::LocalGet(T0), I::I64Const(0xFFF), I::I64And, I::I32WrapI64, I::I32Add);
     emit!(f, I::LocalSet(ADDR));
-    if is_load {
-        int_load(f, size, signed, dst64, rt);
-    } else {
-        int_store(f, size, rt);
+    match (vec, is_load) {
+        (false, true) => int_load(f, size, signed, dst64, rt),
+        (false, false) => int_store(f, size, rt),
+        (true, true) => vec_load(f, size, rt),
+        (true, false) => vec_store(f, size, rt),
     }
     // Pre/post-index writeback: rn = base + imm (Pre: == EA = T0; Post: T0 + imm).
     if let Some((rn, post, imm)) = writeback {
@@ -404,15 +405,18 @@ pub(crate) fn lower_mem_pair(
     ram_size: u64,
     count_base: Option<u32>,
 ) -> bool {
-    let Insn::LoadStorePair { is_load, signed, width8, vec, rt, rt2, rn, offset, index, .. } = *insn
+    let Insn::LoadStorePair { is_load, signed, width8, vec, vesize, rt, rt2, rn, offset, index } =
+        *insn
     else {
         return false;
     };
-    if vec {
-        return false;
-    }
-    let size = if width8 { 3 } else { 2 };
-    let esize = if width8 { 8i64 } else { 4 };
+    // Integer pair: 4- or 8-byte elements. Vector pair: element size `vesize`
+    // (2=S/4B, 3=D/8B, 4=Q/16B).
+    let (size, esize) = if vec {
+        (vesize, 1i64 << vesize)
+    } else {
+        (if width8 { 3 } else { 2 }, if width8 { 8i64 } else { 4 })
+    };
     let span = 2 * esize as u64;
     let wide = width8 || signed; // X form / LDPSW write full 64-bit; W form zero-extends
     let ea_disp = match index {
@@ -513,12 +517,23 @@ pub(crate) fn lower_mem_pair(
     emit!(f, I::LocalGet(T0), I::I64Const(0xFFF), I::I64And, I::I32WrapI64, I::I32Add);
     emit!(f, I::LocalSet(ADDR));
     // two accesses, esize apart
-    if is_load {
-        inline_pair_load(f, 0, size, signed, wide, rt);
-        inline_pair_load(f, esize, size, signed, wide, rt2);
-    } else {
-        inline_pair_store(f, 0, size, rt);
-        inline_pair_store(f, esize, size, rt2);
+    match (vec, is_load) {
+        (false, true) => {
+            inline_pair_load(f, 0, size, signed, wide, rt);
+            inline_pair_load(f, esize, size, signed, wide, rt2);
+        }
+        (false, false) => {
+            inline_pair_store(f, 0, size, rt);
+            inline_pair_store(f, esize, size, rt2);
+        }
+        (true, true) => {
+            inline_vec_pair_load(f, 0, size, rt);
+            inline_vec_pair_load(f, esize, size, rt2);
+        }
+        (true, false) => {
+            inline_vec_pair_store(f, 0, size, rt);
+            inline_vec_pair_store(f, esize, size, rt2);
+        }
     }
     // pre/post-index writeback: rn = base + offset (Pre: == EA = T0; Post: T0 + offset)
     if matches!(index, PairIndex::Pre | PairIndex::Post) {
@@ -551,6 +566,42 @@ fn inline_pair_load(f: &mut Function, host_off: i64, size: u8, signed: bool, wid
         emit!(f, I::Drop);
     } else {
         emit!(f, I::I64Store(at(offsets::x(rt as usize))));
+    }
+}
+
+/// One element of an inline vector pair load, at byte offset `host_off` from
+/// [`ADDR`], into V[rt] (zeroing the unused high bytes — a SIMD load writes the
+/// whole 128-bit register).
+fn inline_vec_pair_load(f: &mut Function, host_off: i64, size: u8, rt: u8) {
+    let v = offsets::v(rt as usize);
+    if size == 4 {
+        emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(ADDR));
+        if host_off != 0 {
+            emit!(f, I::I32Const(host_off as i32), I::I32Add);
+        }
+        emit!(f, I::V128Load(at(0)), I::V128Store(at(v)));
+    } else {
+        emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(ADDR));
+        if host_off != 0 {
+            emit!(f, I::I32Const(host_off as i32), I::I32Add);
+        }
+        emit!(f, load_op(size, false), I::I64Store(at(v)));
+        emit!(f, I::LocalGet(REGS_BASE), I::I64Const(0), I::I64Store(at(v + 8)));
+    }
+}
+
+/// One element of an inline vector pair store, the low `1 << size` bytes of
+/// V[rt], at byte offset `host_off` from [`ADDR`].
+fn inline_vec_pair_store(f: &mut Function, host_off: i64, size: u8, rt: u8) {
+    let v = offsets::v(rt as usize);
+    emit!(f, I::LocalGet(ADDR));
+    if host_off != 0 {
+        emit!(f, I::I32Const(host_off as i32), I::I32Add);
+    }
+    if size == 4 {
+        emit!(f, I::LocalGet(REGS_BASE), I::V128Load(at(v)), I::V128Store(at(0)));
+    } else {
+        emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(v)), store_op(size));
     }
 }
 
