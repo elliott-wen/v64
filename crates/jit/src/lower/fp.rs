@@ -15,10 +15,17 @@ use aarch64_cpu_state::regs::offsets;
 use aarch64_decoder::Insn;
 use wasm_encoder::{BlockType, Function, Instruction as I, ValType};
 
+use super::cond::emit_cond_test;
 use super::common::*;
 
 const DEFAULT_NAN_32: i64 = 0x7FC0_0000;
 const DEFAULT_NAN_64: i64 = 0x7FF8_0000_0000_0000;
+
+// NZCV words for an FP compare result (N@31, Z@30, C@29, V@28).
+const NZCV_LT: i64 = 1 << 31; // N
+const NZCV_EQ: i64 = (1 << 30) | (1 << 29); // Z,C
+const NZCV_GT: i64 = 1 << 29; // C
+const NZCV_UN: i64 = (1 << 29) | (1 << 28); // C,V (unordered)
 
 /// Eligibility gate: the scalar-FP forms lowered here. Single (`ftype` 0) and
 /// double (`ftype` 1) only — half-precision and the FPSR/rounding-mode-sensitive
@@ -28,8 +35,11 @@ pub(crate) fn is_inline_fp(insn: &Insn) -> bool {
         Insn::FpDataProc1 { ftype, opcode, .. } => {
             *ftype <= 1 && matches!((ftype, opcode), (_, 0..=3) | (0, 5) | (1, 4))
         }
-        Insn::FpDataProc2 { ftype, opcode, .. } => *ftype <= 1 && *opcode <= 5 || (*ftype <= 1 && *opcode == 8),
-        Insn::FpImm { ftype, .. } => *ftype <= 1,
+        Insn::FpDataProc2 { ftype, opcode, .. } => *ftype <= 1 && (*opcode <= 5 || *opcode == 8),
+        Insn::FpImm { ftype, .. }
+        | Insn::FpCompare { ftype, .. }
+        | Insn::FpCondCompare { ftype, .. }
+        | Insn::FpCondSelect { ftype, .. } => *ftype <= 1,
         _ => false,
     }
 }
@@ -109,6 +119,79 @@ pub(crate) fn imm(f: &mut Function, ftype: u8, imm8: u8, rd: u8) {
     } else {
         emit!(f, I::I64Const(expand_imm_d(imm8) as i64), I::LocalSet(T0));
         write_d_t0(f, rd);
+    }
+}
+
+/// FCMP/FCMPE — set NZCV from the ordered comparison (signaling only affects
+/// FPSR, which we don't model, so it has no effect here). `cmp_zero` compares
+/// against +0.0.
+pub(crate) fn compare(f: &mut Function, ftype: u8, rm: u8, rn: u8, cmp_zero: bool) {
+    nzcv_from_cmp(f, ftype == 0, rm, rn, cmp_zero); // -> T0
+    emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T0), I::I64Store(at(offsets::NZCV)));
+}
+
+/// FCCMP/FCCMPE — if `cond` holds, compare and set NZCV; else force NZCV to the
+/// 4-bit immediate.
+pub(crate) fn ccmp(f: &mut Function, ftype: u8, rm: u8, rn: u8, cond: u8, nzcv: u8) {
+    emit_cond_test(f, cond);
+    emit!(f, I::If(BlockType::Empty));
+    nzcv_from_cmp(f, ftype == 0, rm, rn, false);
+    emit!(f, I::LocalGet(REGS_BASE), I::LocalGet(T0), I::I64Store(at(offsets::NZCV)));
+    emit!(f, I::Else);
+    let packed = (i64::from(nzcv >> 3 & 1) << 31)
+        | (i64::from(nzcv >> 2 & 1) << 30)
+        | (i64::from(nzcv >> 1 & 1) << 29)
+        | (i64::from(nzcv & 1) << 28);
+    emit!(f, I::LocalGet(REGS_BASE), I::I64Const(packed), I::I64Store(at(offsets::NZCV)), I::End);
+}
+
+/// FCSEL — select Rn or Rm by `cond` (raw bit copy, zeroing the rest of Vd).
+pub(crate) fn csel(f: &mut Function, ftype: u8, cond: u8, rm: u8, rn: u8, rd: u8) {
+    let single = ftype == 0;
+    emit_cond_test(f, cond);
+    emit!(f, I::If(BlockType::Result(ValType::I64)));
+    load_bits_ext(f, single, rn);
+    emit!(f, I::Else);
+    load_bits_ext(f, single, rm);
+    emit!(f, I::End, I::LocalSet(T0));
+    write_t0(f, single, rd);
+}
+
+/// Compute the NZCV word for `cmp(Rn, Rm-or-0)` into [`T0`] via a lt/eq/gt cascade
+/// (all-false = unordered, since a NaN compares false every way).
+fn nzcv_from_cmp(f: &mut Function, single: bool, rm: u8, rn: u8, cmp_zero: bool) {
+    let (lt, eq, gt) =
+        if single { (I::F32Lt, I::F32Eq, I::F32Gt) } else { (I::F64Lt, I::F64Eq, I::F64Gt) };
+    cmp_pair(f, single, rn, rm, cmp_zero);
+    emit!(f, lt, I::If(BlockType::Result(ValType::I64)), I::I64Const(NZCV_LT), I::Else);
+    cmp_pair(f, single, rn, rm, cmp_zero);
+    emit!(f, eq, I::If(BlockType::Result(ValType::I64)), I::I64Const(NZCV_EQ), I::Else);
+    cmp_pair(f, single, rn, rm, cmp_zero);
+    emit!(f, gt, I::If(BlockType::Result(ValType::I64)), I::I64Const(NZCV_GT), I::Else);
+    emit!(f, I::I64Const(NZCV_UN), I::End, I::End, I::End, I::LocalSet(T0));
+}
+
+/// Push Rn then (Rm or +0.0) as the working float for a compare.
+fn cmp_pair(f: &mut Function, single: bool, rn: u8, rm: u8, cmp_zero: bool) {
+    read(f, single, rn);
+    if cmp_zero {
+        // +0.0 without an Ieee literal: reinterpret an all-zero word.
+        if single {
+            emit!(f, I::I32Const(0), I::F32ReinterpretI32);
+        } else {
+            emit!(f, I::I64Const(0), I::F64ReinterpretI64);
+        }
+    } else {
+        read(f, single, rm);
+    }
+}
+
+/// Push V[rn]'s scalar bits as i64 (low 32 zero-extended for single).
+fn load_bits_ext(f: &mut Function, single: bool, rn: u8) {
+    if single {
+        emit!(f, I::LocalGet(REGS_BASE), I::I32Load(at(offsets::v(rn as usize))), I::I64ExtendI32U);
+    } else {
+        emit!(f, I::LocalGet(REGS_BASE), I::I64Load(at(offsets::v(rn as usize))));
     }
 }
 

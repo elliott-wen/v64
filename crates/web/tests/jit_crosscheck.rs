@@ -429,6 +429,19 @@ fn fp_dp2(ftype: u32, opcode: u32, rm: u32, rn: u32, rd: u32) -> u32 {
 fn fp_imm_enc(ftype: u32, imm8: u32, rd: u32) -> u32 {
     FP_HDR | (ftype << 22) | (1 << 21) | (imm8 << 13) | (0b100 << 10) | rd
 }
+fn fcmp(ftype: u32, rm: u32, rn: u32) -> u32 {
+    FP_HDR | (ftype << 22) | (1 << 21) | (rm << 16) | (0b1000 << 10) | (rn << 5)
+}
+fn fccmp(ftype: u32, rm: u32, rn: u32, cond: u32, nzcv: u32) -> u32 {
+    FP_HDR | (ftype << 22) | (1 << 21) | (rm << 16) | (cond << 12) | (0b01 << 10) | (rn << 5) | nzcv
+}
+fn fcsel(ftype: u32, cond: u32, rm: u32, rn: u32, rd: u32) -> u32 {
+    FP_HDR | (ftype << 22) | (1 << 21) | (rm << 16) | (cond << 12) | (0b11 << 10) | (rn << 5) | rd
+}
+/// SUB immediate, 64-bit, no flags (so it doesn't clobber the FCMP NZCV).
+fn sub_imm(rd: u32, rn: u32, imm12: u32) -> u32 {
+    0xD100_0000 | (imm12 << 10) | (rn << 5) | rd
+}
 
 /// Scalar double-precision FP: arithmetic, sqrt, abs/neg, min/max, mov, and a
 /// move-immediate, recomputed each iteration (no accumulation, so the values
@@ -474,6 +487,31 @@ fn fp_nan() {
         (4, u128::from(f64::INFINITY.to_bits())),
     ];
     crosscheck(&code, &[(0, 400)], &vs, 24, "fp_nan");
+}
+
+/// FP compare / conditional-compare / conditional-select. FCMP sets NZCV (kept
+/// to the exit via a non-flag-setting SUB counter, so it's compared directly);
+/// FCSEL's result depends on those flags, so a wrong NZCV diverges the V regs.
+#[wasm_bindgen_test]
+fn fp_compare_select() {
+    let code = [
+        fcmp(1, 1, 0),                    // FCMP d0, d1 -> NZCV
+        fcsel(1, 0b1011, 3, 2, 4),        // FCSEL d4, d2, d3, LT
+        fccmp(1, 5, 0, 0b1010, 0b0110),   // FCCMP d0, d5, #6, GE
+        fcsel(1, 0b0000, 7, 6, 8),        // FCSEL d8, d6, d7, EQ
+        sub_imm(0, 0, 1),                 // x0-- (no flags)
+        cbnz(0, -20),
+    ];
+    let vs = [
+        (0, u128::from(1.5f64.to_bits())),
+        (1, u128::from(2.5f64.to_bits())),
+        (2, u128::from(10.0f64.to_bits())),
+        (3, u128::from(20.0f64.to_bits())),
+        (5, u128::from(0.5f64.to_bits())),
+        (6, u128::from(30.0f64.to_bits())),
+        (7, u128::from(40.0f64.to_bits())),
+    ];
+    crosscheck(&code, &[(0, 400)], &vs, 24, "fp_cmpsel");
 }
 
 // ---- Randomized-operand sweep over the lowered families. ----
