@@ -6,9 +6,6 @@
 
 import init, { Emulator } from './pkg-web/aarch64_web.js';
 
-const KERNEL = '../../guest/prebuilt/Image-tiny';
-const INITRD = '../../guest/prebuilt/uitest.cpio.gz';
-const BOOTARGS = 'earlycon=pl011,0x9000000 console=ttyAMA0 rdinit=/init';
 const CHUNK = 250_000;   // guest instructions per run() call
 const SLICE_MS = 8;      // run chunks up to this long, then yield to messages
 
@@ -27,13 +24,34 @@ async function bytes(url) {
   return new Uint8Array(await r.arrayBuffer());
 }
 
-async function start() {
+// Fetch a possibly-gzipped blob, decompressing in the browser. Used for the disk
+// image (a raw block device the kernel won't decompress); the kernel Image and
+// the .cpio.gz initrd are passed through untouched (the kernel inflates initrd).
+async function fetchMaybeGz(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch ${url}: ${r.status}`);
+  const stream = url.endsWith('.gz')
+    ? r.body.pipeThrough(new DecompressionStream('gzip'))
+    : r.body;
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// cfg = { kernel, bootargs, and either initrd (RAM fs) or disk (ext4 block dev) }
+async function start(cfg) {
   post({ ev: 'log', text: '[loading wasm + guest image…]\n' });
   await init();
-  const [image, initrd] = await Promise.all([bytes(KERNEL), bytes(INITRD)]);
+  const kernel = await bytes(cfg.kernel);
   emu = new Emulator();
-  emu.boot(image, initrd, BOOTARGS);
-  post({ ev: 'log', text: `[booted: kernel ${image.length} B, initrd ${initrd.length} B]\n` });
+  if (cfg.disk) {
+    post({ ev: 'log', text: '[fetching root disk (may be large)…]\n' });
+    const disk = await fetchMaybeGz(cfg.disk);
+    emu.boot_disk(kernel, disk, cfg.bootargs);
+    post({ ev: 'log', text: `[booted: kernel ${kernel.length} B, disk ${disk.length} B]\n` });
+  } else {
+    const initrd = await bytes(cfg.initrd);
+    emu.boot(kernel, initrd, cfg.bootargs);
+    post({ ev: 'log', text: `[booted: kernel ${kernel.length} B, initrd ${initrd.length} B]\n` });
+  }
   running = true;
   statT = performance.now();
   statN = 0;
@@ -86,7 +104,7 @@ function schedule(idle) {
 onmessage = (e) => {
   const m = e.data;
   switch (m.cmd) {
-    case 'start': start().catch((err) => post({ ev: 'log', text: `\n[error: ${err.message || err}]\n` })); break;
+    case 'start': start(m.cfg).catch((err) => post({ ev: 'log', text: `\n[error: ${err.message || err}]\n` })); break;
     case 'jit': useJit = m.on; break;
     case 'key': if (emu) emu.key(m.code, m.down); break;
     case 'motion': if (emu) emu.mouse_motion(m.dx, m.dy, m.wheel); break;

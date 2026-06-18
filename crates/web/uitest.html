@@ -41,6 +41,12 @@
 <header>
   <h1>v64 · uitest</h1>
   <button id="start">Boot</button>
+  <label>image
+    <select id="img">
+      <option value="uitest">uitest (initramfs)</option>
+      <option value="desktop">desktop (ext4 disk)</option>
+    </select>
+  </label>
   <label><input type="checkbox" id="jit" checked /> JIT</label>
   <span class="hint">click screen to capture mouse · keys go to the guest · Esc(in guest) quits uitest</span>
   <span id="stats"></span>
@@ -53,9 +59,26 @@
 <script type="module">
 const startBtn = document.getElementById('start');
 const jitBox   = document.getElementById('jit');
+const imgSel   = document.getElementById('img');
 const statsEl  = document.getElementById('stats');
 const consoleEl = document.getElementById('console');
 const canvas   = document.getElementById('screen');
+
+// Boot targets. uitest is the in-RAM framebuffer/input smoke test; desktop is a
+// real X11 rootfs on a virtio-blk disk (build it with guest/desktop/mkrootfs.sh
+// and drop rootfs.ext4.gz in guest/prebuilt/).
+const IMAGES = {
+  uitest: {
+    kernel: '../../guest/prebuilt/Image-tiny',
+    initrd: '../../guest/prebuilt/uitest.cpio.gz',
+    bootargs: 'earlycon=pl011,0x9000000 console=ttyAMA0 rdinit=/init',
+  },
+  desktop: {
+    kernel: '../../guest/prebuilt/Image-tiny',
+    disk: '../../guest/prebuilt/rootfs.ext4.gz',
+    bootargs: 'console=ttyAMA0 root=/dev/vda rw rootfstype=ext4 random.trust_cpu=on',
+  },
+};
 
 function log(s) {
   const atBottom = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 4;
@@ -154,7 +177,7 @@ function boot() {
   };
   worker.onerror = (e) => { log(`\n[worker error: ${e.message}]\n`); stop(); };
 
-  worker.postMessage({ cmd: 'start' });
+  worker.postMessage({ cmd: 'start', cfg: IMAGES[imgSel.value] });
   worker.postMessage({ cmd: 'jit', on: jitBox.checked });
   running = true;
   requestAnimationFrame(render);

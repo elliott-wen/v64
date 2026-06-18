@@ -199,6 +199,18 @@ impl Emulator {
         self.board.boot_image(image, initrd, bootargs);
     }
 
+    /// Like [`boot`](Self::boot), but with a virtio-blk `disk` (appears as
+    /// `/dev/vda`) and no initrd — for a real root filesystem. Pass e.g.
+    /// `root=/dev/vda rw rootfstype=ext4 console=ttyAMA0` in `bootargs`. The disk
+    /// must be attached before boot so the device tree advertises it.
+    pub fn boot_disk(&mut self, image: &[u8], disk: &[u8], bootargs: &str) {
+        self.kbd = Some(self.board.attach_input(InputKind::Keyboard));
+        self.mouse = Some(self.board.attach_input(InputKind::Mouse));
+        self.gpu = Some(self.board.attach_gpu(1024, 768));
+        self.board.attach_disk(disk.to_vec());
+        self.board.boot_image(image, None, bootargs);
+    }
+
     /// The latest virtio-gpu scanout as B8G8R8A8 bytes, or an empty buffer if the
     /// guest hasn't drawn a new frame since the last call. On a new frame the
     /// dimensions are cached for [`fb_width`](Self::fb_width)/[`fb_height`](Self::fb_height).
