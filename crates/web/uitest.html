@@ -52,7 +52,9 @@ import init, { Emulator } from './pkg-web/aarch64_web.js';
 const KERNEL  = '../../guest/prebuilt/Image-tiny';
 const INITRD  = '../../guest/prebuilt/uitest.cpio.gz';
 const BOOTARGS = 'earlycon=pl011,0x9000000 console=ttyAMA0 rdinit=/init';
-const BATCH = 2_000_000;          // guest instructions per animation frame
+const CHUNK = 250_000;            // guest instructions per emulation chunk
+const FRAME_MS = 8;               // cap emulation to ~half the frame, leaving
+                                  // the rest for paint + input (avoids jank)
 
 const startBtn = document.getElementById('start');
 const jitBox   = document.getElementById('jit');
@@ -104,13 +106,13 @@ function drawFrame() {
   if (!imageData || imageData.width !== w || imageData.height !== h) {
     imageData = ctx2d.createImageData(w, h);
   }
-  const d = imageData.data;
-  // BGRA -> RGBA (swap B and R), force opaque alpha.
-  for (let i = 0; i < px.length; i += 4) {
-    d[i]   = px[i + 2];
-    d[i+1] = px[i + 1];
-    d[i+2] = px[i];
-    d[i+3] = 255;
+  // BGRA -> RGBA, opaque, a word at a time. In memory the guest pixel is
+  // [B,G,R,A] (LE u32 = A<<24|R<<16|G<<8|B); canvas wants [R,G,B,A].
+  const src = new Uint32Array(px.buffer, px.byteOffset, px.length >> 2);
+  const dst = new Uint32Array(imageData.data.buffer);
+  for (let i = 0; i < src.length; i++) {
+    const v = src[i];
+    dst[i] = 0xff000000 | ((v & 0xff) << 16) | (v & 0x0000ff00) | ((v >> 16) & 0xff);
   }
   ctx2d.putImageData(imageData, 0, 0);
 }
@@ -118,10 +120,20 @@ function drawFrame() {
 function frame() {
   if (!running) return;
   const useJit = jitBox.checked;
-  const status = useJit ? emu.run_jit(BATCH) : emu.run(BATCH);
 
-  const u = emu.take_uart();
-  if (u.length) log(dec.decode(u));
+  // Run in small chunks bounded to ~FRAME_MS so paint + input stay responsive,
+  // and stop early once the guest goes idle (a chunk that doesn't fill means it
+  // hit WFI on poll()), so an idle guest costs almost nothing per frame.
+  const t = performance.now();
+  let status = 0;
+  do {
+    const before = Number(emu.total_insns());
+    status = useJit ? emu.run_jit(CHUNK) : emu.run(CHUNK);
+    const u = emu.take_uart();
+    if (u.length) log(dec.decode(u));
+    if (status === 1 || Number(emu.total_insns()) - before < CHUNK) break;
+  } while (performance.now() - t < FRAME_MS);
+
   drawFrame();
 
   // Stats: total instructions + a rolling MIPS estimate.
