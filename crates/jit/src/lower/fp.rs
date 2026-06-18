@@ -33,7 +33,10 @@ const NZCV_UN: i64 = (1 << 29) | (1 << 28); // C,V (unordered)
 pub(crate) fn is_inline_fp(insn: &Insn) -> bool {
     match insn {
         Insn::FpDataProc1 { ftype, opcode, .. } => {
-            *ftype <= 1 && matches!((ftype, opcode), (_, 0..=3) | (0, 5) | (1, 4))
+            // FMOV/FABS/FNEG/FSQRT (0..3), FCVT single<->double (5/4), and FRINT
+            // N/P/M/Z/X/I (nearest/ceil/floor/trunc). FRINTA (0xc, tie-away) and
+            // half-precision fall back.
+            *ftype <= 1 && matches!((ftype, opcode), (_, 0..=3) | (0, 5) | (1, 4) | (_, 0x8 | 0x9 | 0xa | 0xb | 0xe | 0xf))
         }
         Insn::FpDataProc2 { ftype, opcode, .. } => *ftype <= 1 && (*opcode <= 5 || *opcode == 8),
         Insn::FpImm { ftype, .. }
@@ -201,12 +204,31 @@ pub(crate) fn dp1(f: &mut Function, ftype: u8, opcode: u8, rn: u8, rd: u8) {
             canon_s(f);
             write_s_t0(f, rd);
         }
-        _ => {
-            // FCVT single -> double (opcode 5).
+        5 => {
+            // FCVT single -> double.
             read_s(f, rn);
             emit!(f, I::F64PromoteF32);
             canon_d(f);
             write_d_t0(f, rd);
+        }
+        _ => {
+            // FRINT N/P/M/Z/X/I — round to integral. (Tie-away FRINTA is gated out.)
+            read(f, single, rn);
+            emit!(
+                f,
+                match (opcode, single) {
+                    (0x9, true) => I::F32Ceil,
+                    (0x9, false) => I::F64Ceil,
+                    (0xa, true) => I::F32Floor,
+                    (0xa, false) => I::F64Floor,
+                    (0xb, true) => I::F32Trunc,
+                    (0xb, false) => I::F64Trunc,
+                    // FRINTN (0x8) and FRINTX/I (0xe/0xf, current mode = nearest).
+                    (_, true) => I::F32Nearest,
+                    (_, false) => I::F64Nearest,
+                }
+            );
+            canon_write(f, single, rd);
         }
     }
 }

@@ -539,6 +539,23 @@ fn fp_conversions() {
     crosscheck(&code, &xs, &vs, 36, "fp_conv");
 }
 
+/// FRINT round-to-integral: nearest (ties-even), ceil, floor, trunc, in double
+/// and single. (Tie-away FRINTA stays interpreted.)
+#[wasm_bindgen_test]
+fn fp_round() {
+    let code = [
+        fp_dp1(1, 0x8, 0, 1), // FRINTN d1, d0
+        fp_dp1(1, 0x9, 0, 2), // FRINTP d2, d0
+        fp_dp1(1, 0xa, 0, 3), // FRINTM d3, d0
+        fp_dp1(1, 0xb, 0, 4), // FRINTZ d4, d0
+        fp_dp1(0, 0x8, 5, 6), // FRINTN s6, s5
+        subs_imm(0, 0, 1),
+        cbnz(0, -24),
+    ];
+    let vs = [(0, u128::from(2.5f64.to_bits())), (5, u128::from((-1.5f32).to_bits()))];
+    crosscheck(&code, &[(0, 400)], &vs, 28, "fp_round");
+}
+
 // ---- Randomized-operand sweep over the lowered families. ----
 
 /// xorshift64* — deterministic so any failure is reproducible from the seed.
