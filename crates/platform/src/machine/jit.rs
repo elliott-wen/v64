@@ -54,6 +54,32 @@ pub trait BlockRunner {
     fn invalidate(&mut self);
 }
 
+/// A fast hasher for the physical-address `jit_cache` key: the default
+/// `SipHash` is overkill for a single `u64` looked up on every region call
+/// (tens of millions of times). A Fibonacci multiply avalanches the high bits
+/// enough for a power-of-two bucket array.
+#[derive(Default)]
+pub(super) struct PaHasher(u64);
+
+impl std::hash::Hasher for PaHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Only `write_u64` is used for a u64 key; fold defensively otherwise.
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(b)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+/// Physical-address → block-classification cache, keyed for fast lookup.
+pub(super) type JitCache =
+    std::collections::HashMap<u64, JitBlock, std::hash::BuildHasherDefault<PaHasher>>;
+
 /// How the organizer runs the block at a given physical address.
 #[derive(Clone, Copy)]
 pub(super) enum JitBlock {

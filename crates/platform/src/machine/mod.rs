@@ -92,7 +92,7 @@ pub struct Machine {
     /// `CpuState` directly (it's `#[repr(C)]` in shared linear memory), so there
     /// is no separate register image to hold here.
     #[cfg(feature = "jit")]
-    jit_cache: std::collections::HashMap<u64, jit::JitBlock>,
+    jit_cache: jit::JitCache,
 }
 
 impl Machine {
@@ -126,7 +126,7 @@ impl Machine {
             #[cfg(feature = "jit")]
             jit_calls: 0,
             #[cfg(feature = "jit")]
-            jit_cache: std::collections::HashMap::new(),
+            jit_cache: jit::JitCache::default(),
         }
     }
 
