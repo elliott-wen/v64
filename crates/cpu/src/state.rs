@@ -128,17 +128,10 @@ pub struct CpuState {
     pub tlb_flushed: bool,
 }
 
-// The leading fields must sit at exactly the offsets generated JIT blocks use,
-// since a block reads/writes them directly in the shared `CpuState`. If this
-// fails, the `#[repr(C)]` layout drifted from `regs::offsets` — fix one or the
-// other; they are the contract between the interpreter and emitted code.
-const _: () = {
-    assert!(std::mem::offset_of!(CpuState, x) == crate::regs::offsets::X);
-    assert!(std::mem::offset_of!(CpuState, sp) == crate::regs::offsets::SP);
-    assert!(std::mem::offset_of!(CpuState, pc) == crate::regs::offsets::PC);
-    assert!(std::mem::offset_of!(CpuState, nzcv) == crate::regs::offsets::NZCV);
-    assert!(std::mem::offset_of!(CpuState, v) == crate::regs::offsets::V);
-};
+// `regs::offsets` derives X/SP/PC/NZCV/V from this struct's `#[repr(C)]` layout
+// via `offset_of!`, so they always match what generated blocks load/store — no
+// separate spec to keep in sync. The field *order* (x, sp, pc, nzcv, v leading)
+// is the zero-copy contract; see the struct doc above.
 
 /// Byte offset of [`CpuState::jit_count`] within `CpuState`, for the JIT emitter
 /// to store the per-block instruction count a block executed (it shares the

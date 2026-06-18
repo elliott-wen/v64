@@ -12,16 +12,18 @@
 
 /// Byte offsets of each JIT-addressable register field within [`crate::CpuState`]
 /// (`x`, `sp`, `pc`, `nzcv`, `v`), shared by the JIT emitter and the organizer.
-/// Pinned by the `#[repr(C)]` offset asserts in `state.rs`.
+/// Derived from the `#[repr(C)]` layout via `offset_of!`, so they track the
+/// struct and can't drift. (Expected values for orientation: X=0, SP=248=31*8,
+/// PC=256, NZCV=264, V=272.)
 pub mod offsets {
-    pub const X: usize = 0;
-    pub const SP: usize = 248; // 31 * 8
-    pub const PC: usize = 256;
-    pub const NZCV: usize = 264;
-    pub const V: usize = 272; // 16-byte aligned (u128)
-    pub const FPCR: usize = 784; // V + 32 * 16
-    /// Total size of the register image (16-byte aligned for the u128 array).
-    pub const SIZE: usize = 800;
+    use crate::CpuState;
+    use std::mem::offset_of;
+
+    pub const X: usize = offset_of!(CpuState, x);
+    pub const SP: usize = offset_of!(CpuState, sp);
+    pub const PC: usize = offset_of!(CpuState, pc);
+    pub const NZCV: usize = offset_of!(CpuState, nzcv);
+    pub const V: usize = offset_of!(CpuState, v);
 
     /// Byte offset of `X[n]`.
     #[must_use]
