@@ -492,87 +492,91 @@ fn rand_simd(rng: &mut Rng) -> u32 {
 /// The first three SIMD families (kept separate so `rand_simd` stays readable).
 fn rand_simd_three_same_misc_shift(rng: &mut Rng, rd: u32, rn: u32, rm: u32, q: u32) -> u32 {
     match rng.below(4) {
-        3 => {
-            // permute: ZIP1/2, UZP1/2, TRN1/2, and EXT.
-            if rng.below(2) == 0 {
+        3 => match rng.below(3) {
+            // permute: ZIP1/2, UZP1/2, TRN1/2.
+            0 => {
                 let opcode = [0b001u32, 0b010, 0b011, 0b101, 0b110, 0b111][rng.below(6) as usize];
                 let size = if q == 1 { rng.below(4) } else { rng.below(3) };
                 (q << 30) | (0b01110 << 24) | (size << 22) | (rm << 16)
                     | (opcode << 12) | (1 << 11) | (rn << 5) | rd
-            } else {
+            }
+            // EXT: byte extract.
+            1 => {
                 let imm4 = if q == 1 { rng.below(16) } else { rng.below(8) };
                 (q << 30) | (1 << 29) | (0b01110 << 24) | (rm << 16) | (imm4 << 11) | (rn << 5) | rd
             }
-        }
+            // TBL, single table register (len=0, op=0); the only inlined table form.
+            _ => (q << 30) | (0b001110 << 24) | (rm << 16) | (rn << 5) | rd,
+        },
         0 => {
-            // three-same: ADD/SUB (any size, 2D needs Q=1), MUL, AND/ORR/EOR.
+            // three-same: the full bit-exact handled set — ADD/SUB (2D needs Q=1),
+            // MUL, all eight logical (incl. BSL/BIT/BIF/BIC/ORN), CMEQ/CMTST,
+            // saturating add/sub (8/16-bit), CMGT/CMHI, CMGE, S/UMAX, S/UMIN.
             let mut q = q;
-            let (u, size, opcode) = match rng.below(6) {
-                0 => {
-                    let s = rng.below(4);
-                    if s == 3 {
-                        q = 1;
-                    }
-                    (0, s, 0b10000) // ADD
+            let sz4 = |q: &mut u32, rng: &mut Rng| {
+                let s = rng.below(4);
+                if s == 3 {
+                    *q = 1;
                 }
-                1 => {
-                    let s = rng.below(4);
-                    if s == 3 {
-                        q = 1;
-                    }
-                    (1, s, 0b10000) // SUB
-                }
-                2 => (0, rng.below(3), 0b10011), // MUL (no 2D)
-                3 => (0, 0b00, 0b00011),         // AND
-                4 => (0, 0b10, 0b00011),         // ORR
-                _ => (1, 0b00, 0b00011),         // EOR
+                s
+            };
+            let (u, size, opcode) = match rng.below(13) {
+                0 => (0, sz4(&mut q, rng), 0b10000),         // ADD
+                1 => (1, sz4(&mut q, rng), 0b10000),         // SUB
+                2 => (0, 1 + rng.below(2), 0b10011),         // MUL (size 1/2)
+                3 => (rng.below(2), rng.below(4), 0b00011),  // logical (all 8)
+                4 => (1, sz4(&mut q, rng), 0b10001),         // CMEQ
+                5 => (0, sz4(&mut q, rng), 0b10001),         // CMTST
+                6 => (rng.below(2), rng.below(2), 0b00001),  // SQADD/UQADD (8/16-bit)
+                7 => (rng.below(2), rng.below(2), 0b00101),  // SQSUB/UQSUB (8/16-bit)
+                8 => (0, sz4(&mut q, rng), 0b00110),         // CMGT (signed, any size)
+                9 => (1, rng.below(3), 0b00110),             // CMHI (unsigned, size 0-2)
+                10 => (0, sz4(&mut q, rng), 0b00111),        // CMGE (signed, any size)
+                11 => (rng.below(2), rng.below(3), 0b01100), // S/UMAX (size 0-2)
+                _ => (rng.below(2), rng.below(3), 0b01101),  // S/UMIN (size 0-2)
             };
             three_same(q, u, size, opcode, rd, rn, rm)
         }
         1 => {
-            // two-register-misc: NEG/ABS/NOT/CNT/CMEQ0/CMGT0/REV64.
+            // two-register-misc: NEG/ABS/NOT/CNT, compare-to-zero
+            // CMGT/CMGE/CMEQ/CMLE/CMLT #0, and REV64/REV16.
             let mut q = q;
-            let (u, opcode, size) = match rng.below(7) {
-                0 => {
-                    let s = rng.below(4);
-                    if s == 3 {
-                        q = 1;
-                    }
-                    (1, 0b01011, s) // NEG
+            let sz4 = |q: &mut u32, rng: &mut Rng| {
+                let s = rng.below(4);
+                if s == 3 {
+                    *q = 1;
                 }
-                1 => {
-                    let s = rng.below(4);
-                    if s == 3 {
-                        q = 1;
-                    }
-                    (0, 0b01011, s) // ABS
-                }
-                2 => (1, 0b00101, 0), // NOT
-                3 => (0, 0b00101, 0), // CNT
-                4 => {
-                    let s = rng.below(4);
-                    if s == 3 {
-                        q = 1;
-                    }
-                    (0, 0b01001, s) // CMEQ #0
-                }
-                5 => {
-                    let s = rng.below(4);
-                    if s == 3 {
-                        q = 1;
-                    }
-                    (0, 0b01000, s) // CMGT #0
-                }
-                _ => (0, 0b00000, rng.below(3)), // REV64 (size 0..2)
+                s
+            };
+            let (u, opcode, size) = match rng.below(11) {
+                0 => (1, 0b01011, sz4(&mut q, rng)), // NEG
+                1 => (0, 0b01011, sz4(&mut q, rng)), // ABS
+                2 => (1, 0b00101, 0),                // NOT
+                3 => (0, 0b00101, 0),                // CNT
+                4 => (0, 0b01001, sz4(&mut q, rng)), // CMEQ #0
+                5 => (0, 0b01000, sz4(&mut q, rng)), // CMGT #0
+                6 => (1, 0b01000, sz4(&mut q, rng)), // CMGE #0
+                7 => (1, 0b01001, sz4(&mut q, rng)), // CMLE #0
+                8 => (0, 0b01010, sz4(&mut q, rng)), // CMLT #0
+                9 => (0, 0b00000, rng.below(3)),     // REV64 (size 0..2)
+                _ => (0, 0b00001, rng.below(2)),     // REV16 (size 0..1)
             };
             (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22)
                 | (0b10000 << 17) | (opcode << 12) | (0b10 << 10) | (rn << 5) | rd
         }
         _ => {
-            // shift-by-immediate, byte lanes (immh=0001): SHL / SSHR / USHR.
-            let immb = rng.below(8);
+            // shift-by-immediate across element sizes: SHL / SSHR / USHR. immh
+            // selects the size (64-bit needs Q=1); immh:immb keeps the shift
+            // amount in [0, esize) for SHL and [1, esize] for the right shifts.
+            let mut q = q;
             let (u, opcode) = [(0u32, 0b01010u32), (0, 0b00000), (1, 0b00000)][rng.below(3) as usize];
-            (q << 30) | (u << 29) | (0b011110 << 23) | (1 << 19) | (immb << 16)
+            let size = rng.below(4);
+            if size == 3 {
+                q = 1;
+            }
+            let immh = (1u32 << size) | rng.below(1u32 << size);
+            let immb = rng.below(8);
+            (q << 30) | (u << 29) | (0b011110 << 23) | (immh << 19) | (immb << 16)
                 | (opcode << 11) | (1 << 10) | (rn << 5) | rd
         }
     }

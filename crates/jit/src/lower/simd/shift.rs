@@ -8,6 +8,13 @@ use wasm_encoder::{Function, Instruction as I};
 use super::{finish_v, push_v};
 use crate::lower::common::at;
 
+/// Whether [`simd_shift_imm`] handles this form: SHL (`01010`, signed slot) and
+/// SSHR/USHR (`00000`). The rounding/accumulating/saturating/narrowing variants
+/// fall back.
+pub(super) fn can_lower(u: bool, opcode: u8) -> bool {
+    opcode == 0b00000 || (opcode == 0b01010 && !u)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simd_shift_imm(f: &mut Function, q: bool, u: bool, immh: u8, immb: u8, opcode: u8, rn: u8, rd: u8) -> bool {
     let size = 3 - (immh.leading_zeros() as u8 - 4); // highest set bit of immh

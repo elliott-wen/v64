@@ -12,10 +12,16 @@ use wasm_encoder::{Function, Instruction as I};
 use super::push_v;
 use crate::lower::common::at;
 
+/// Whether [`simd_three_diff`] handles this form — only the widening multiply
+/// SMULL/UMULL (opcode `1100`) at source size 8/16/32.
+pub(super) fn can_lower(size: u8, opcode: u8) -> bool {
+    opcode == 0b1100 && size <= 2
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simd_three_diff(f: &mut Function, q: bool, u: bool, size: u8, opcode: u8, rm: u8, rn: u8, rd: u8) -> bool {
     // opcode 0b1100 = SMULL/UMULL; source element size 0..2 (8/16/32 -> 16/32/64).
-    if opcode != 0b1100 || size > 2 {
+    if !can_lower(size, opcode) {
         return false;
     }
     emit!(f, I::LocalGet(0));

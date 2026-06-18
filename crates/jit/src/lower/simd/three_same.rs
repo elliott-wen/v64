@@ -14,6 +14,13 @@ fn lane2(f: &mut Function, q: bool, rn: u8, rm: u8, rd: u8, op: I<'static>) {
     finish_v(f, q, rd);
 }
 
+/// Whether [`simd_three_same`] handles this form (logical and CMEQ/CMTST always,
+/// else whatever [`simple_op`] maps). The eligibility gate calls this so block
+/// formation never admits a form the emitter would decline.
+pub(super) fn can_lower(u: bool, size: u8, opcode: u8) -> bool {
+    matches!(opcode, 0b00011 | 0b10001) || simple_op(u, size, opcode).is_some()
+}
+
 /// Advanced SIMD three-same (integer). Returns whether it was lowered inline;
 /// declines (no emission) for forms WASM can't express bit-exactly.
 #[allow(clippy::too_many_arguments)]

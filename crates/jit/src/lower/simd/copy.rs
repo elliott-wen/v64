@@ -56,6 +56,13 @@ fn splat(f: &mut Function, size: u8) {
     }
 }
 
+/// Whether [`simd_mod_imm`] handles this form — every integer cmode (the
+/// FMOV-vector cmode 1111 is the only fall-back). Reuses [`expand_imm`], the
+/// emitter's own decoder, so the gate can't drift from it.
+pub(crate) fn can_lower_mod_imm(op: bool, cmode: u8, imm8: u8) -> bool {
+    expand_imm(op, cmode, imm8).is_some()
+}
+
 /// MOVI/MVNI/ORR/BIC (modified immediate). The 64-bit element is a constant, so
 /// MOVI/MVNI become a `v128.const`; ORR/BIC fold it against Vd. The FMOV-vector
 /// cmode (1111) needs the FP immediate expansion and falls back.

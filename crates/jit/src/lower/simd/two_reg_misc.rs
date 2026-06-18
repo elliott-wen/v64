@@ -26,6 +26,26 @@ fn cmp_zero(f: &mut Function, q: bool, rn: u8, rd: u8, op: I<'static>) {
     finish_v(f, q, rd);
 }
 
+/// Whether [`simd_two_reg_misc`] handles this `(u, opcode)` form (NOT is size-0
+/// only). Mirrors the dispatch below; the eligibility gate calls it.
+pub(super) fn can_lower(u: bool, size: u8, opcode: u8) -> bool {
+    match (u, opcode) {
+        (true, 0b00101) => size == 0, // NOT
+        (false, 0b00101) // CNT
+        | (true, 0b01011) // NEG
+        | (false, 0b01011) // ABS
+        | (false, 0b01000) // CMGT #0
+        | (true, 0b01000) // CMGE #0
+        | (false, 0b01001) // CMEQ #0
+        | (true, 0b01001) // CMLE #0
+        | (false, 0b01010) // CMLT #0
+        | (false, 0b00000) // REV64
+        | (false, 0b00001) // REV16
+        | (true, 0b00000) => true, // REV32
+        _ => false,
+    }
+}
+
 pub(crate) fn simd_two_reg_misc(f: &mut Function, q: bool, u: bool, size: u8, opcode: u8, rn: u8, rd: u8) -> bool {
     match (u, opcode) {
         (true, 0b00101) if size == 0 => unary(f, q, rn, rd, I::V128Not), // NOT

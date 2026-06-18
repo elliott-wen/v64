@@ -44,10 +44,15 @@ pub(crate) fn simd_ext(f: &mut Function, q: bool, imm4: u8, rm: u8, rn: u8, rd: 
     shuffle2(f, q, rn, rm, rd, lanes);
 }
 
+/// Whether [`simd_tbl`] handles this form — a single-register TBL (not TBX).
+pub(super) fn can_lower_tbl(is_tbx: bool, len: u8) -> bool {
+    !is_tbx && len == 0
+}
+
 /// TBL with a single table register maps to `i8x16.swizzle` (index >= 16 -> 0,
 /// matching AArch64). Multi-register tables and TBX (keep-on-miss) fall back.
 pub(crate) fn simd_tbl(f: &mut Function, q: bool, is_tbx: bool, len: u8, rm: u8, rn: u8, rd: u8) -> bool {
-    if is_tbx || len != 0 {
+    if !can_lower_tbl(is_tbx, len) {
         return false;
     }
     emit!(f, I::LocalGet(0)); // base for the store

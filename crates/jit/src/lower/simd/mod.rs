@@ -1,7 +1,8 @@
 //! Advanced SIMD lowering. Maps the bit-exact integer subset of NEON to WASM
 //! `v128` lane ops; anything WASM can't express exactly (saturating, halving,
-//! pairwise, FP, polynomial, the i64 ops WASM lacks) falls back to
-//! `interpret_one`.
+//! pairwise, FP, polynomial, the i64 ops WASM lacks) ends the block and is left
+//! to the interpreter. [`is_inline_simd`] is the eligibility gate that admits
+//! exactly the forms lowered here.
 //!
 //! The guest V registers are 128-bit, stored little-endian at `offsets::v(n)`,
 //! which matches WASM's `v128` lane order, so lane ops map directly. For the
@@ -13,6 +14,7 @@
 //! helpers live here.
 
 use aarch64_cpu_state::regs::offsets;
+use aarch64_decoder::Insn;
 use wasm_encoder::{Function, Instruction as I};
 
 use crate::lower::common::at;
@@ -33,6 +35,30 @@ pub(super) use shift::simd_shift_imm;
 pub(super) use three_diff::simd_three_diff;
 pub(super) use three_same::simd_three_same;
 pub(super) use two_reg_misc::simd_two_reg_misc;
+
+/// Eligibility gate for SIMD: true iff the lowering here handles `insn`. The
+/// copy/permute families (DUP/INS/UMOV/SMOV, ZIP/TRN/UZP, EXT) are total; the
+/// rest delegate to each family's co-located `can_lower`, which reuses the
+/// emitter's own decode helpers so the gate can't drift from what's emitted.
+/// Returns false for every non-SIMD instruction.
+pub(crate) fn is_inline_simd(insn: &Insn) -> bool {
+    match insn {
+        Insn::SimdDupGeneral { .. }
+        | Insn::SimdDupElement { .. }
+        | Insn::SimdInsGeneral { .. }
+        | Insn::SimdInsElement { .. }
+        | Insn::SimdMovToGpr { .. }
+        | Insn::SimdZipTrn { .. }
+        | Insn::SimdExt { .. } => true,
+        Insn::SimdThreeSame { u, size, opcode, .. } => three_same::can_lower(*u, *size, *opcode),
+        Insn::SimdTwoRegMisc { u, size, opcode, .. } => two_reg_misc::can_lower(*u, *size, *opcode),
+        Insn::SimdThreeDiff { size, opcode, .. } => three_diff::can_lower(*size, *opcode),
+        Insn::SimdModImm { op, cmode, imm8, .. } => copy::can_lower_mod_imm(*op, *cmode, *imm8),
+        Insn::SimdShiftImm { u, opcode, .. } => shift::can_lower(*u, *opcode),
+        Insn::SimdTableLookup { is_tbx, len, .. } => permute::can_lower_tbl(*is_tbx, *len),
+        _ => false,
+    }
+}
 
 /// Load V[r] as a `v128` onto the stack.
 fn push_v(f: &mut Function, r: u8) {

@@ -44,6 +44,7 @@ use arith::BOp;
 
 pub(crate) use common::{SCRATCH_I32, SCRATCH_I64};
 pub(crate) use memory::{lower_mem, lower_mem_pair};
+pub(crate) use simd::is_inline_simd;
 pub(crate) use terminator::{lower_terminator, taken_target};
 
 /// Emit the block prologue: cache the runtime entry PC for position-independent
